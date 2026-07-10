@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Handball-Tracker</title>
+  <meta name="description" content="Handball-Statistiken live vom Spielfeldrand tracken." />
+  <meta name="theme-color" content="#12233F" />
+
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+
+  <!-- iOS: installierbar & Vollbild ohne Safari-Leisten -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Handball" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #F1F4F8; }
+    /* Aussparung für iPad/iPhone-Notch im Vollbild */
+    body { padding-top: env(safe-area-inset-top); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="./app.js"></script>
+</body>
+</html>
