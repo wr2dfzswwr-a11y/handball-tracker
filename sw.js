@@ -1,4 +1,4 @@
-const CACHE = "handball-tracker-v9";
+const CACHE = "handball-tracker-v11";
 const ASSETS = [
   "./",
   "./index.html",
