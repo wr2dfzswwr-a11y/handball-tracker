@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import * as XLSX from "xlsx-js-style";
 
 /* ============================================================
    Handball-Tracker
@@ -67,6 +68,35 @@ const SIMPLE_LABEL = {
   assist: "Assist", steal: "Steal", block: "Block", tf: "Technischer Fehler",
   m7won: "7m herausgeholt", m7caused: "7m verursacht",
 };
+
+/* ---------- Zentrale Spalten-Definitionen (App-Tabelle + Excel-Export) ----------
+   Regel: Neues Statistik-Feld = EIN Eintrag hier – Tabelle und Export ziehen mit.
+   `short` = Spaltenkopf in der App, `label` = ausgeschriebener Kopf im Excel. */
+const FIELD_STAT_COLS = [
+  { key: "goals", label: "Tore", short: "Tore" },
+  { key: "shots", label: "Würfe", short: "Würfe" },
+  { key: "quote", label: "Quote", short: "Quote", percent: true },
+  { key: "min", label: "Min.", short: "Min.", isMin: true },
+  { key: "assist", label: "Assists", short: "Ass." },
+  { key: "tf", label: "Techn. Fehler", short: "TF" },
+  { key: "steal", label: "Steals", short: "St." },
+  { key: "block", label: "Blocks", short: "Bl." },
+  { key: "p2", label: "2 Minuten", short: "2min" },
+  { key: "m7won", label: "7m herausgeholt", short: "7m+" },
+  { key: "m7caused", label: "7m verursacht", short: "7m−" },
+];
+const KEEPER_STAT_COLS = [
+  { key: "saves", label: "Paraden", short: "Paraden" },
+  { key: "conceded", label: "Gegentore", short: "Gegentore" },
+  { key: "quote", label: "Quote", short: "Quote", percent: true },
+  { key: "min", label: "Min.", short: "Min.", isMin: true },
+];
+/* Karten erscheinen nur im Spieler-Detail (App) bzw. Spieler-Blatt (Excel). */
+const PLAYER_CARD_ROWS = [
+  { key: "yellow", label: "Gelbe Karten" },
+  { key: "red", label: "Rote Karten" },
+  { key: "blue", label: "Blaue Karten" },
+];
 
 /* ---------- Positionen (feste Slot-Reihenfolge) ---------- */
 const POSITIONS = ["TW", "LA", "RL", "RM", "RR", "RA", "KL"];
@@ -727,7 +757,7 @@ function playerLabel(team, id) {
    - fromSec/toSec: Zeitfenster – nur Aktionen mit fromSec <= sec < toSec zählen,
      Spielzeit wird auf das Fenster begrenzt (Wechsel-Historie bleibt vollständig).
    - endSec: explizites Spielende (z. B. aktueller Timer bei Live-Statistik). */
-function aggregate(team, games, opts = {}) {
+export function aggregate(team, games, opts = {}) {
   const fromSec = opts.fromSec || 0;
   const toSec = opts.toSec == null ? Infinity : opts.toSec;
   const inWin = (s) => (s || 0) >= fromSec && (s || 0) < toSec;
@@ -1825,6 +1855,7 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
   const team = data.teams.find((t) => t.id === teamId);
   const game = data.games.find((g) => g.id === gameId);
   const [editId, setEditId] = useState(null);
+  const [verlaufOpen, setVerlaufOpen] = useState(true); // Spielverlauf ein-/ausklappen (reiner UI-Zustand)
   if (!team || !game) return <Empty>Spiel nicht gefunden.</Empty>;
   const sc = computeScore(game);
   const scoreStr = game.home ? `${sc.us}:${sc.them}` : `${sc.them}:${sc.us}`;
@@ -1865,9 +1896,20 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
         }
       />
       <Card style={{ marginBottom: 14 }}>
-        <SectionH>Spielverlauf</SectionH>
-        {rows.length === 0 && <Empty>Keine Aktionen erfasst.</Empty>}
-        {rows.map(({ kind, e: a, score }) => (
+        <button onClick={() => setVerlaufOpen((o) => !o)} style={{
+          ...btnBase, padding: "4px 8px", background: "transparent", color: C.ink,
+          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          justifyContent: "flex-start", marginBottom: verlaufOpen ? 10 : 0,
+        }}>
+          <span style={{ fontSize: 12, color: C.sub }}>{verlaufOpen ? "▾" : "▸"}</span>
+          <span style={{ fontFamily: SANS, fontSize: 15, fontWeight: 800, color: C.ink }}>
+            Spielverlauf{!verlaufOpen ? ` (${rows.length})` : ""}
+          </span>
+        </button>
+        {verlaufOpen && (
+          <>
+            {rows.length === 0 && <Empty>Keine Aktionen erfasst.</Empty>}
+            {rows.map(({ kind, e: a, score }) => (
           <div key={a.id} style={{ borderBottom: `1px solid ${C.line}`, padding: "8px 0" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{
@@ -1955,6 +1997,8 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
             )}
           </div>
         ))}
+          </>
+        )}
       </Card>
       <div style={{ marginBottom: 14 }}>
         <HeatmapSection team={team} games={[game]} />
@@ -1973,14 +2017,17 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
 const heatFill = (q) => (q == null ? C.court : `hsl(${Math.round(q * 125)}, 62%, 82%)`);
 const heatText = (q) => (q == null ? C.sub : `hsl(${Math.round(q * 125)}, 70%, 24%)`);
 
-function HeatChip({ label, d, countOnly }) {
+function HeatChip({ label, d, countOnly, onClick, selected, dimmed }) {
   const q = d && d.n ? d.k / d.n : null;
+  const wrap = {
+    flex: 1, textAlign: "center", padding: "10px 6px", borderRadius: 12,
+    border: `${selected ? 3 : 1}px solid ${selected ? C.ink : C.line}`,
+    opacity: dimmed ? 0.4 : 1, cursor: onClick ? "pointer" : "default",
+    transition: "opacity 0.15s, border 0.15s",
+  };
   if (countOnly) {
     return (
-      <div style={{
-        flex: 1, textAlign: "center", padding: "10px 6px", borderRadius: 12,
-        background: C.bg, border: `1px solid ${C.line}`,
-      }}>
+      <div onClick={onClick} style={{ ...wrap, background: C.bg }}>
         <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 800, color: C.sub }}>{label}</div>
         <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 800, color: C.ink }}>
           {d && d.n ? `${d.n}×` : "–"}
@@ -1989,10 +2036,7 @@ function HeatChip({ label, d, countOnly }) {
     );
   }
   return (
-    <div style={{
-      flex: 1, textAlign: "center", padding: "10px 6px", borderRadius: 12,
-      background: heatFill(q), border: `1px solid ${C.line}`,
-    }}>
+    <div onClick={onClick} style={{ ...wrap, background: heatFill(q) }}>
       <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 800, color: C.sub }}>{label}</div>
       <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 800, color: heatText(q) }}>
         {q == null ? "–" : `${d.k}/${d.n} · ${Math.round(q * 100)}%`}
@@ -2001,15 +2045,21 @@ function HeatChip({ label, d, countOnly }) {
   );
 }
 
-function CourtHeat({ data }) {
+function CourtHeat({ data, selectedZone, onZoneClick }) {
+  const clickable = !!onZoneClick;
   return (
     <div>
-      <svg viewBox="-4 -8 408 306" style={{ width: "100%", display: "block" }}>
+      <svg viewBox="-4 -8 408 306" style={{ width: "100%", display: "block", touchAction: "manipulation" }}>
         {Object.keys(ZONE_PATHS).map((z) => {
           const d = data[z];
           const q = d && d.n ? d.k / d.n : null;
+          const isSel = selectedZone === z;
+          const dimmed = !!selectedZone && !isSel;
           return (
-            <path key={z} d={ZONE_PATHS[z]} fill={heatFill(q)} stroke="#fff" strokeWidth="2">
+            <path key={z} d={ZONE_PATHS[z]} fill={heatFill(q)}
+              stroke={isSel ? C.ink : "#fff"} strokeWidth={isSel ? 4 : 2}
+              opacity={dimmed ? 0.35 : 1} style={{ cursor: clickable ? "pointer" : "default" }}
+              onClick={clickable ? () => onZoneClick(z) : undefined}>
               <title>{ZONE_LABEL[z]}</title>
             </path>
           );
@@ -2022,8 +2072,9 @@ function CourtHeat({ data }) {
         {Object.entries(ZONE_LABEL_POS).map(([z, [x, y]]) => {
           const d = data[z];
           const q = d && d.n ? d.k / d.n : null;
+          const dimmed = !!selectedZone && selectedZone !== z;
           return (
-            <g key={z} pointerEvents="none">
+            <g key={z} pointerEvents="none" opacity={dimmed ? 0.35 : 1}>
               <text x={x} y={y - 8} textAnchor="middle"
                 style={{ fontFamily: SANS, fontSize: 10, fontWeight: 700, fill: C.sub }}>{ZONE_SHORT[z]}</text>
               <text x={x} y={y + 6} textAnchor="middle"
@@ -2045,14 +2096,25 @@ function CourtHeat({ data }) {
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         {["SIEBEN_M", "KONTER", "FREIWURF"].map((z) => (
-          <HeatChip key={z} label={ZONE_LABEL[z]} d={data[z]} />
+          <HeatChip key={z} label={ZONE_LABEL[z]} d={data[z]}
+            onClick={clickable ? () => onZoneClick(z) : undefined}
+            selected={selectedZone === z}
+            dimmed={!!selectedZone && selectedZone !== z} />
         ))}
       </div>
     </div>
   );
 }
 
-function GoalHeat({ data }) {
+/* Metriken für die Zielzonen-Heatmap. Die Abwurfzonen-Heatmap bleibt bewusst
+   immer bei "x/y · %" – umgeschaltet wird nur die Zielverteilung. */
+const GOAL_METRIC_OPTIONS = [
+  { id: "shots", label: () => "Würfe" },
+  { id: "goals", label: (isKeeper) => (isKeeper ? "Paraden" : "Tore") },
+  { id: "quote", label: () => "Quote" },
+];
+
+function GoalHeat({ data, metricMode = "quote" }) {
   const cells = [];
   for (let r = 0; r < 3; r++)
     for (let c = 0; c < 3; c++)
@@ -2074,19 +2136,28 @@ function GoalHeat({ data }) {
         {cells.map((cl) => {
           const d = data[cl.id];
           const q = d && d.n ? d.k / d.n : null;
+          const hasN = !!(d && d.n);
+          const isCount = metricMode !== "quote";
+          const fill = isCount ? (hasN ? C.bg : "#fff") : heatFill(q);
+          const textColor = isCount ? (hasN ? C.ink : C.sub) : heatText(q);
+          const mainText = !hasN ? "–"
+            : metricMode === "shots" ? `${d.n}×`
+            : metricMode === "goals" ? `${d.k}×`
+            : `${d.k}/${d.n}`;
+          const subText = metricMode === "quote" && q != null ? `${Math.round(q * 100)}%` : null;
           return (
             <g key={cl.id}>
-              <rect x={cl.x} y={cl.y} width="96" height="64" fill={heatFill(q)} stroke="#fff" strokeWidth="2">
+              <rect x={cl.x} y={cl.y} width="96" height="64" fill={fill} stroke="#fff" strokeWidth="2">
                 <title>{TARGET_LABEL[cl.id]}</title>
               </rect>
               <text x={cl.x + 48} y={cl.y + 30} textAnchor="middle" pointerEvents="none"
-                style={{ fontFamily: MONO, fontSize: 14, fontWeight: 800, fill: heatText(q) }}>
-                {q == null ? "–" : `${d.k}/${d.n}`}
+                style={{ fontFamily: MONO, fontSize: 14, fontWeight: 800, fill: textColor }}>
+                {mainText}
               </text>
-              {q != null && (
+              {subText != null && (
                 <text x={cl.x + 48} y={cl.y + 46} textAnchor="middle" pointerEvents="none"
-                  style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, fill: heatText(q) }}>
-                  {Math.round(q * 100)}%
+                  style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, fill: textColor }}>
+                  {subText}
                 </text>
               )}
             </g>
@@ -2112,6 +2183,118 @@ function GoalHeat({ data }) {
   );
 }
 
+/* Wurf-/Paraden-Verteilung nach Abwurfzone und Zielzone.
+   Gemeinsame Datenquelle für Heatmap-Ansicht UND Excel-Export (Regel 1).
+   zoneTargets[zone][target] = {n,k} ist die Kreuzauswertung für den
+   Abwurfzone→Zielzone-Drilldown; der Export nutzt sie nicht (rein additiv). */
+export function computeHeat(games, selId, isKeeper) {
+  const zones = {}, targets = {}, zoneTargets = {};
+  let n = 0, k = 0;
+  const bump = (map, key, hit) => {
+    if (!key) return;
+    const e = (map[key] ||= { n: 0, k: 0 });
+    e.n++; if (hit) e.k++;
+  };
+  const bumpCross = (zoneKey, targetKey, hit) => {
+    if (!zoneKey || !targetKey) return;
+    const zmap = (zoneTargets[zoneKey] ||= {});
+    const e = (zmap[targetKey] ||= { n: 0, k: 0 });
+    e.n++; if (hit) e.k++;
+  };
+  for (const g of games) {
+    for (const a of g.actions || []) {
+      if (a.type !== "throw") continue;
+      if (!isKeeper) {
+        if (a.side !== "us") continue;
+        if (selId !== "team" && a.playerId !== selId) continue;
+        const hit = a.result === "goal";
+        bump(zones, a.zone, hit); bump(targets, a.target, hit);
+        bumpCross(a.zone, a.target, hit);
+        n++; if (hit) k++;
+      } else {
+        if (a.side !== "them" || a.keeperId !== selId) continue;
+        if (a.result !== "goal" && a.result !== "saved") continue; // Pfosten/vorbei zählt nicht für den TW
+        const save = a.result === "saved";
+        bump(zones, a.zone, save); bump(targets, a.target, save);
+        bumpCross(a.zone, a.target, save);
+        n++; if (save) k++;
+      }
+    }
+  }
+  return { zones, targets, zoneTargets, total: { n, k } };
+}
+
+/* Abwurfzone→Zielzone-Drilldown: Klick auf eine Abwurfzone (Feldzonen und
+   Standardsituationen) hebt sie hervor und filtert die Zielzonen-Heatmap auf
+   die Würfe aus genau dieser Zone. Gemeinsam genutzt von HeatmapSection und
+   der kompakten Spielerdetail-Variante. */
+function ThrowZoneDrilldown({ zones, targets, zoneTargets, isKeeper }) {
+  const [selZone, setSelZone] = useState(null);
+  const [metricMode, setMetricMode] = useState("quote");
+  const shownTargets = selZone ? ((zoneTargets || {})[selZone] || {}) : targets;
+  const selCount = selZone ? (zones[selZone]?.n || 0) : null;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div>
+        <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 800, color: C.ink, marginBottom: 6 }}>
+          {isKeeper ? "Nach Abwurfzone des Gegners" : "Nach Abwurfzone"}
+          <span style={{ fontWeight: 400, color: C.sub, fontSize: 12, marginLeft: 6 }}>
+            (Zone antippen für die Zielverteilung)
+          </span>
+        </div>
+        <CourtHeat data={zones} selectedZone={selZone}
+          onZoneClick={(z) => setSelZone((cur) => (cur === z ? null : z))} />
+      </div>
+      <div style={{ borderTop: `2px solid ${C.line}`, paddingTop: 14, marginTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+          <div>
+            <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 800, color: C.ink }}>
+              {selZone ? `Zielverteilung aus ${ZONE_LABEL[selZone]}` : "Nach Zielzone im Tor"}
+            </div>
+            {selZone && (
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{selCount} {selCount === 1 ? "Wurf" : "Würfe"} aus dieser Zone</span>
+                <Btn kind="ghost" small onClick={() => setSelZone(null)} style={{ padding: "3px 9px", fontSize: 11 }}>
+                  ✕ Filter aufheben
+                </Btn>
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {GOAL_METRIC_OPTIONS.map((opt) => (
+              <button key={opt.id} onClick={() => setMetricMode(opt.id)} style={{
+                ...btnBase, padding: "6px 10px", fontSize: 12,
+                background: metricMode === opt.id ? C.navy : "#fff",
+                color: metricMode === opt.id ? "#fff" : C.sub,
+                border: `2px solid ${metricMode === opt.id ? C.navy : C.line}`,
+              }}>{opt.label(isKeeper)}</button>
+            ))}
+          </div>
+        </div>
+        <GoalHeat data={shownTargets} metricMode={metricMode} />
+      </div>
+    </div>
+  );
+}
+
+/* Kompakte Wurfanalyse für die Spielerdetailansicht: gleicher Drilldown, aber
+   ohne Dropdown – fest auf diesen Spieler bezogen, nutzt den dort vorhandenen
+   Zeitraum-/Spiele-Filter. */
+function PlayerThrowZoneCard({ games, player }) {
+  const isKeeper = player.pos === "TW";
+  const { zones, targets, zoneTargets, total } = useMemo(
+    () => computeHeat(games, player.id, isKeeper),
+    [games, player.id, isKeeper]
+  );
+  if (total.n === 0) return null; // Feld-/Torhüterstatistik zeigt bereits den Hinweis
+  return (
+    <Card>
+      <SectionH>Wurfanalyse – {isKeeper ? "Paradenquote" : "Torquote"}</SectionH>
+      <ThrowZoneDrilldown zones={zones} targets={targets} zoneTargets={zoneTargets} isKeeper={isKeeper} />
+    </Card>
+  );
+}
+
 function HeatmapSection({ team, games }) {
   const [selId, setSelId] = useState("team");
   const player = team.players.find((p) => p.id === selId);
@@ -2119,34 +2302,10 @@ function HeatmapSection({ team, games }) {
   const keepers = team.players.filter((p) => p.pos === "TW");
   const field = team.players.filter((p) => p.pos === "F");
 
-  const { zones, targets, total } = useMemo(() => {
-    const zones = {}, targets = {};
-    let n = 0, k = 0;
-    const bump = (map, key, hit) => {
-      if (!key) return;
-      const e = (map[key] ||= { n: 0, k: 0 });
-      e.n++; if (hit) e.k++;
-    };
-    for (const g of games) {
-      for (const a of g.actions || []) {
-        if (a.type !== "throw") continue;
-        if (!isKeeper) {
-          if (a.side !== "us") continue;
-          if (selId !== "team" && a.playerId !== selId) continue;
-          const hit = a.result === "goal";
-          bump(zones, a.zone, hit); bump(targets, a.target, hit);
-          n++; if (hit) k++;
-        } else {
-          if (a.side !== "them" || a.keeperId !== selId) continue;
-          if (a.result !== "goal" && a.result !== "saved") continue; // Pfosten/vorbei zählt nicht für den TW
-          const save = a.result === "saved";
-          bump(zones, a.zone, save); bump(targets, a.target, save);
-          n++; if (save) k++;
-        }
-      }
-    }
-    return { zones, targets, total: { n, k } };
-  }, [team, games, selId, isKeeper]);
+  const { zones, targets, zoneTargets, total } = useMemo(
+    () => computeHeat(games, selId, isKeeper),
+    [team, games, selId, isKeeper]
+  );
 
   const metric = isKeeper ? "Paradenquote" : "Torquote";
   const totalQ = total.n ? Math.round((total.k / total.n) * 100) : null;
@@ -2181,20 +2340,9 @@ function HeatmapSection({ team, games }) {
         <Empty>{isKeeper ? "Für diesen Torhüter sind noch keine gegnerischen Würfe erfasst." : "Noch keine Würfe im gewählten Zeitraum."}</Empty>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          <div>
-            <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 800, color: C.ink, marginBottom: 6 }}>
-              {isKeeper ? "Nach Abwurfzone des Gegners" : "Nach Abwurfzone"}
-            </div>
-            <CourtHeat data={zones} />
-          </div>
-          <div style={{ borderTop: `2px solid ${C.line}`, paddingTop: 14, marginTop: 10 }}>
-            <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 800, color: C.ink, marginBottom: 6 }}>
-              Nach Zielzone im Tor
-            </div>
-            <GoalHeat data={targets} />
-          </div>
+          <ThrowZoneDrilldown zones={zones} targets={targets} zoneTargets={zoneTargets} isKeeper={isKeeper} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontFamily: SANS, fontSize: 12, color: C.sub, fontWeight: 700 }}>{metric}:</span>
+            <span style={{ fontFamily: SANS, fontSize: 12, color: C.sub, fontWeight: 700 }}>{metric} (Abwurfzone):</span>
             {[0, 0.25, 0.5, 0.75, 1].map((q) => (
               <span key={q} style={{
                 fontFamily: MONO, fontSize: 11, fontWeight: 700, color: heatText(q),
@@ -2338,6 +2486,7 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
               </div>
             </Card>
           )}
+          <PlayerThrowZoneCard games={source} player={player} />
         </>
       )}
     </div>
@@ -2411,7 +2560,234 @@ function StatsFilterCard({ games, sel, setSel, fromMin, setFromMin, toMin, setTo
   );
 }
 
-function StatsTab({ team, games, go, teamId }) {
+/* ============================================================
+   Excel-Export (nur Statistik-Tab)
+   Regeln: siehe export-regeln.md –
+   1. keine eigene Statistik-Logik (nutzt aggregate/buildStatRows/computeHeat),
+   2. Spalten kommen aus FIELD_STAT_COLS / KEEPER_STAT_COLS,
+   3. jedes Blatt ist eine eigene build*Sheet-Funktion.
+   ============================================================ */
+const XL_INK = "16202E", XL_SUB = "5C6B7E", XL_BLUE = "2E5EAA", XL_NAVY = "1F3F76";
+const XL = {
+  title: { font: { bold: true, sz: 14, color: { rgb: XL_INK } } },
+  sub: { font: { sz: 10, color: { rgb: XL_SUB } } },
+  section: { font: { bold: true, sz: 12, color: { rgb: XL_NAVY } } },
+  th: {
+    font: { bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+    fill: { fgColor: { rgb: XL_BLUE } },
+    alignment: { horizontal: "right" },
+  },
+  thLeft: {
+    font: { bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+    fill: { fgColor: { rgb: XL_BLUE } },
+    alignment: { horizontal: "left" },
+  },
+  note: { font: { italic: true, sz: 10, color: { rgb: XL_SUB } } },
+  bold: { font: { bold: true, color: { rgb: XL_INK } } },
+};
+const xlText = (v, s) => ({ v: v == null ? "" : String(v), t: "s", ...(s ? { s } : {}) });
+const xlNum = (v, s) => ({ v: v == null ? 0 : v, t: "n", ...(s ? { s } : {}) });
+/* Quote als echter Excel-Prozentwert (Bruch + Format "0%"), "–" wenn kein Nenner. */
+const xlPct = (num, den, s) => (den ? { v: num / den, t: "n", z: "0%", ...(s ? { s } : {}) } : xlText("–", s));
+/* Minuten wie in der App: "–" ohne erfasste Startaufstellung, sonst gerundete Minuten. */
+const xlMin = (sec) => (sec == null || sec < 0 ? xlText("–") : xlNum(Math.round(sec / 60)));
+
+const sanitizeFileName = (s) => s.replace(/[\\/:*?"<>|]/g, "-").trim();
+const sanitizeSheetName = (s, used) => {
+  let base = s.replace(/[\\/:*?\[\]]/g, "-").slice(0, 31).trim() || "Blatt";
+  let name = base, i = 2;
+  while (used.has(name)) name = `${base.slice(0, 28)} ${i++}`;
+  used.add(name);
+  return name;
+};
+
+export function exportFileName(games, sel) {
+  const today = fmtDate(todayISO());
+  if (sel === "all") return sanitizeFileName(`Saison-Pflichtspiele – Export ${today}`);
+  if (sel === "tests") return sanitizeFileName(`Testspiele – Export ${today}`);
+  const g = games.find((x) => x.id === sel);
+  if (!g) return sanitizeFileName(`Statistik – Export ${today}`);
+  return sanitizeFileName(`${g.opponent} – ${fmtDate(g.date)}${g.test ? " (Test)" : ""}`);
+}
+
+/* Überschrift + Untertitel je nach Filterzustand (Kontext auf jedem Blatt). */
+function exportHeading(team, games, sel, gamesCount, rangeActive, fromMin, toMin) {
+  const g = games.find((x) => x.id === sel);
+  const title =
+    sel === "all" ? "Saison – alle beendeten Pflichtspiele" :
+    sel === "tests" ? "Testspiele" :
+    g ? `${g.opponent} – ${fmtDate(g.date)}${g.test ? " (Testspiel)" : ""}` : "Statistik";
+  const parts = [team.name, `${gamesCount} Spiel${gamesCount === 1 ? "" : "e"}`];
+  if (rangeActive) parts.push(`Minute ${fromMin + 1}–${toMin}${toMin >= 60 ? " (bis Spielende)" : ""}`);
+  parts.push(`Exportiert am ${fmtDate(todayISO())}`);
+  return { title, subtitle: parts.join(" · ") };
+}
+
+/* Zonen-/Zielzonen-Tabelle als AoA-Zeilen (gemeinsam für Team- und Spieler-Blätter). */
+function heatRowsAoA(map, labelMap, order, countOnlyKeys = []) {
+  const out = [];
+  for (const key of order) {
+    const d = map[key];
+    if (!d || !d.n) continue;
+    const countOnly = countOnlyKeys.includes(key);
+    out.push([
+      xlText(labelMap[key] || key),
+      xlNum(d.n),
+      countOnly ? xlText("–") : xlNum(d.k),
+      countOnly ? xlText("–") : xlPct(d.k, d.n),
+    ]);
+  }
+  return out;
+}
+
+function buildTeamSheet({ team, agg, rows, kRows, zRows, heading }) {
+  const aoa = [];
+  aoa.push([xlText(heading.title, XL.title)]);
+  aoa.push([xlText(heading.subtitle, XL.sub)]);
+  aoa.push([]);
+  aoa.push([xlText("Feldspieler", XL.section)]);
+  aoa.push([
+    xlText("Nr.", XL.thLeft), xlText("Spieler", XL.thLeft),
+    ...FIELD_STAT_COLS.map((c) => xlText(c.label, XL.th)),
+  ]);
+  for (const r of rows) {
+    aoa.push([
+      xlText(r.num === 999 ? "–" : `#${r.num}`), xlText(r.name, XL.bold),
+      ...FIELD_STAT_COLS.map((c) =>
+        c.percent ? xlPct(r.goals, r.shots) : c.isMin ? xlMin(r.min) : xlNum(r[c.key])
+      ),
+    ]);
+  }
+  if (agg.minutesTracked < agg.gamesCount) {
+    aoa.push([xlText(
+      `Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet (${agg.minutesTracked} von ${agg.gamesCount} Spielen).`,
+      XL.note
+    )]);
+  }
+  if (agg.oppP2 > 0) {
+    aoa.push([xlText(`Gegner: ${agg.oppP2} × 2-Minuten-Strafe (Überzahl-Situationen) im gewählten Zeitraum.`, XL.note)]);
+  }
+  aoa.push([]);
+  aoa.push([xlText("Torhüter", XL.section)]);
+  aoa.push([
+    xlText("Nr.", XL.thLeft), xlText("Torhüter", XL.thLeft),
+    ...KEEPER_STAT_COLS.map((c) => xlText(c.label, XL.th)),
+  ]);
+  for (const r of kRows) {
+    aoa.push([
+      xlText(r.num === 999 ? "–" : `#${r.num}`), xlText(r.name, XL.bold),
+      ...KEEPER_STAT_COLS.map((c) =>
+        c.percent ? xlPct(r.saves, r.saves + r.conceded) : c.isMin ? xlMin(r.min) : xlNum(r[c.key])
+      ),
+    ]);
+  }
+  aoa.push([]);
+  aoa.push([xlText("Wurfzonen (eigene Würfe)", XL.section)]);
+  aoa.push([xlText("Zone", XL.thLeft), xlText("Würfe", XL.th), xlText("Tore", XL.th), xlText("Quote", XL.th)]);
+  for (const r of zRows) {
+    aoa.push([xlText(ZONE_LABEL[r.z]), xlNum(r.shots), xlNum(r.goals), xlPct(r.goals, r.shots)]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!cols"] = [{ wch: 6 }, { wch: 22 }, ...FIELD_STAT_COLS.map(() => ({ wch: 13 }))];
+  return ws;
+}
+
+function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
+  const isKeeper = player.pos === "TW";
+  const s = agg.P[player.id];
+  const k = agg.K[player.id];
+  const mp = agg.MP[player.id] || {};
+  const totalSec = Object.values(mp).reduce((a, b) => a + b, 0);
+  const aoa = [];
+  aoa.push([xlText(`#${player.number} ${player.name}`, XL.title)]);
+  aoa.push([xlText(
+    `${POS_LABEL[player.pos] || (isKeeper ? "Torwart" : "Feldspieler")} · ${heading.title} · ${heading.subtitle}`,
+    XL.sub
+  )]);
+  aoa.push([]);
+  if (s) {
+    aoa.push([xlText("Feldstatistik", XL.section)]);
+    aoa.push([xlText("Kennzahl", XL.thLeft), xlText("Wert", XL.th)]);
+    for (const c of FIELD_STAT_COLS) {
+      if (c.isMin) continue; // Gesamtspielzeit bewusst nur in der Team-Tabelle (Trennungsregel)
+      aoa.push([xlText(c.label), c.percent ? xlPct(s.goals, s.shots) : xlNum(s[c.key])]);
+    }
+    for (const c of PLAYER_CARD_ROWS) aoa.push([xlText(c.label), xlNum(s[c.key])]);
+    aoa.push([]);
+  }
+  if (k) {
+    aoa.push([xlText("Torhüter", XL.section)]);
+    aoa.push([xlText("Kennzahl", XL.thLeft), xlText("Wert", XL.th)]);
+    for (const c of KEEPER_STAT_COLS) {
+      if (c.isMin) continue;
+      aoa.push([xlText(c.label), c.percent ? xlPct(k.saves, k.saves + k.conceded) : xlNum(k[c.key])]);
+    }
+    aoa.push([]);
+  }
+  const hitLabel = isKeeper ? "Paraden" : "Tore";
+  if (heat.total.n > 0) {
+    aoa.push([xlText(isKeeper ? "Paraden nach gegnerischer Abwurfzone" : "Würfe nach Abwurfzone", XL.section)]);
+    aoa.push([xlText("Zone", XL.thLeft), xlText("Würfe", XL.th), xlText(hitLabel, XL.th), xlText("Quote", XL.th)]);
+    aoa.push(...heatRowsAoA(heat.zones, ZONE_LABEL, Object.keys(ZONE_LABEL)));
+    aoa.push([]);
+    aoa.push([xlText(isKeeper ? "Paraden nach Zielzone im Tor" : "Würfe nach Zielzone im Tor", XL.section)]);
+    aoa.push([xlText("Zielzone", XL.thLeft), xlText("Würfe", XL.th), xlText(hitLabel, XL.th), xlText("Quote", XL.th)]);
+    aoa.push(...heatRowsAoA(heat.targets, TARGET_LABEL, Object.keys(TARGET_LABEL), ["POST", "WIDE"]));
+    aoa.push([]);
+  }
+  aoa.push([xlText("Spielzeit nach Position", XL.section)]);
+  const posRows = POSITIONS.filter((pos) => mp[pos] > 0);
+  if (posRows.length === 0) {
+    aoa.push([xlText("Keine Spielzeit-Daten im gewählten Zeitraum (erfasste Startaufstellung erforderlich).", XL.note)]);
+  } else {
+    aoa.push([xlText("Position", XL.thLeft), xlText("Minuten", XL.th), xlText("Anteil", XL.th)]);
+    for (const pos of posRows) {
+      aoa.push([xlText(`${pos} – ${POS_LABEL[pos]}`), xlNum(Math.round(mp[pos] / 60)), xlPct(mp[pos], totalSec)]);
+    }
+    if (seasonScope) {
+      const rosterGames = agg.R[player.id] || 0;
+      const avgMin = rosterGames > 0 ? Math.round(((agg.M[player.id] || 0) / 60 / rosterGames) * 10) / 10 : null;
+      aoa.push([
+        xlText(`Ø Min. pro Spiel (über ${rosterGames} Spiel${rosterGames === 1 ? "" : "e"} im Kader)`, XL.bold),
+        avgMin == null ? xlText("–") : xlNum(avgMin),
+      ]);
+    }
+    if (agg.minutesTracked < agg.gamesCount) {
+      aoa.push([xlText(
+        `Spielzeit nur aus Spielen mit erfasster Startaufstellung (${agg.minutesTracked} von ${agg.gamesCount} Spielen); Kader-Spiele ohne Startaufstellung zählen im Ø mit 0 Minuten.`,
+        XL.note
+      )]);
+    }
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!cols"] = [{ wch: 40 }, { wch: 12 }, { wch: 12 }, { wch: 12 }];
+  return ws;
+}
+
+export function buildExportWorkbook({ team, games, sel, fromMin, toMin, rangeActive, agg, rows, kRows, zRows, heatGames }) {
+  const heading = exportHeading(team, games, sel, agg.gamesCount, rangeActive, fromMin, toMin);
+  const wb = XLSX.utils.book_new();
+  const used = new Set();
+  XLSX.utils.book_append_sheet(wb, buildTeamSheet({ team, agg, rows, kRows, zRows, heading }), sanitizeSheetName("Team", used));
+  // Spieler-Blätter: alle Spieler mit Daten im Filter, nach Trikotnummer sortiert.
+  const ids = new Set([...Object.keys(agg.P), ...Object.keys(agg.K)]);
+  const players = team.players.filter((p) => ids.has(p.id));
+  const sorted = [...players].sort((a, b) => (parseInt(a.number) || 999) - (parseInt(b.number) || 999));
+  const seasonScope = sel === "all" || sel === "tests";
+  for (const player of sorted) {
+    const heat = computeHeat(heatGames, player.id, player.pos === "TW");
+    const ws = buildPlayerSheet({ player, agg, heat, heading, seasonScope });
+    XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName(`#${player.number} ${player.name}`, used));
+  }
+  return { wb, fileName: exportFileName(games, sel) };
+}
+
+function exportStatsToExcel(payload) {
+  const { wb, fileName } = buildExportWorkbook(payload);
+  XLSX.writeFile(wb, `${fileName}.xlsx`);
+}
+
+export function StatsTab({ team, games, go, teamId }) {
   const [sel, setSel] = useState("all");
   const [fromMin, setFromMin] = useState(0);  // Zeitfenster: von Minute (0–59)
   const [toMin, setToMin] = useState(60);     // bis Minute (60 = bis Spielende)
@@ -2443,7 +2819,8 @@ function StatsTab({ team, games, go, teamId }) {
       {source.length === 0 ? <Empty>Noch keine Daten. Beende zuerst ein Spiel.</Empty> : (
         <>
           <HeatmapSection team={team} games={heatGames} />
-          <StatsTables team={team} agg={agg} onPlayer={onPlayer} />
+          <StatsTables team={team} agg={agg} onPlayer={onPlayer}
+            exportCtx={{ games, sel, fromMin, toMin, rangeActive: rangeActive && rangeValid, heatGames }} />
         </>
       )}
     </div>
@@ -2477,33 +2854,42 @@ const mkCmp = (sort, tie) => (a, b) => {
   return d !== 0 ? sort.dir * d : tie(a, b);
 };
 
-function StatsTables({ team, agg, onPlayer }) {
-  const { P, K, Z, M = {}, minutesTracked = 0, gamesCount = 0, oppP2 = 0 } = agg;
+/* Zeilen-Aufbau für Feldspieler-/Torhüter-/Zonen-Tabelle (unsortiert).
+   Gemeinsame Datenquelle für App-Tabelle UND Excel-Export (Regel 1). */
+export function buildStatRows(team, agg) {
+  const { P, K, Z, M = {} } = agg;
+  const meta = (id) => {
+    const p = team.players.find((x) => x.id === id);
+    return { num: parseInt(p?.number) || 999, name: p?.name || "Unbekannt" };
+  };
+  const rows = Object.entries(P).map(([id, s]) => ({
+    id, ...s, ...meta(id),
+    quote: s.shots ? Math.round((s.goals / s.shots) * 100) : 0,
+    min: M[id] == null ? -1 : M[id],
+  }));
+  const kRows = Object.entries(K).map(([id, s]) => ({
+    id, ...s, ...meta(id),
+    quote: s.saves + s.conceded ? Math.round((s.saves / (s.saves + s.conceded)) * 100) : 0,
+    min: M[id] == null ? -1 : M[id],
+  }));
+  const zRows = Object.keys(ZONE_LABEL).map((z) => ({ z, ...(Z[z] || { shots: 0, goals: 0 }) })).filter((r) => r.shots > 0);
+  return { rows, kRows, zRows };
+}
+const cmpFieldDefault = (a, b) => b.goals - a.goals || b.shots - a.shots || a.num - b.num;
+const cmpKeeperDefault = (a, b) => b.saves - a.saves || a.num - b.num;
+
+export function StatsTables({ team, agg, onPlayer, exportCtx }) {
+  const { M = {}, minutesTracked = 0, gamesCount = 0, oppP2 = 0 } = agg;
   const rowProps = (id) => onPlayer
     ? { onClick: () => onPlayer(id), style: { cursor: "pointer" }, title: "Antippen für Spieler-Details" }
     : {};
   const [sortP, setSortP] = useState({ key: "goals", dir: -1 });
   const [sortK, setSortK] = useState({ key: "saves", dir: -1 });
   const fmtMin = (id) => (M[id] == null ? "–" : String(Math.round(M[id] / 60)));
-  const meta = (id) => {
-    const p = team.players.find((x) => x.id === id);
-    return { num: parseInt(p?.number) || 999, name: p?.name || "Unbekannt" };
-  };
-  const rows = Object.entries(P)
-    .map(([id, s]) => ({
-      id, ...s, ...meta(id),
-      quote: s.shots ? Math.round((s.goals / s.shots) * 100) : 0,
-      min: M[id] == null ? -1 : M[id],
-    }))
-    .sort(mkCmp(sortP, (a, b) => b.goals - a.goals || b.shots - a.shots || a.num - b.num));
-  const kRows = Object.entries(K)
-    .map(([id, s]) => ({
-      id, ...s, ...meta(id),
-      quote: s.saves + s.conceded ? Math.round((s.saves / (s.saves + s.conceded)) * 100) : 0,
-      min: M[id] == null ? -1 : M[id],
-    }))
-    .sort(mkCmp(sortK, (a, b) => b.saves - a.saves || a.num - b.num));
-  const zRows = Object.keys(ZONE_LABEL).map((z) => ({ z, ...(Z[z] || { shots: 0, goals: 0 }) })).filter((r) => r.shots > 0);
+  const base = buildStatRows(team, agg);
+  const rows = [...base.rows].sort(mkCmp(sortP, cmpFieldDefault));
+  const kRows = [...base.kRows].sort(mkCmp(sortK, cmpKeeperDefault));
+  const zRows = base.zRows;
   const td = { fontFamily: MONO, fontSize: 14, color: C.ink, textAlign: "right", padding: "7px 6px", borderTop: `1px solid ${C.line}` };
   const tdName = { ...td, fontFamily: SANS, fontWeight: 700, textAlign: "left" };
   const tdNum = { ...td, color: C.sub, textAlign: "left", width: 40 };
@@ -2522,30 +2908,21 @@ function StatsTables({ team, agg, onPlayer }) {
             <thead><tr>
               <SortTh label="Nr." k="num" sort={sortP} setSort={setSortP} defaultDir={1} left />
               <SortTh label="Spieler" k="name" sort={sortP} setSort={setSortP} defaultDir={1} left />
-              <SortTh label="Tore" k="goals" sort={sortP} setSort={setSortP} />
-              <SortTh label="Würfe" k="shots" sort={sortP} setSort={setSortP} />
-              <SortTh label="Quote" k="quote" sort={sortP} setSort={setSortP} />
-              <SortTh label="Min." k="min" sort={sortP} setSort={setSortP} />
-              <SortTh label="Ass." k="assist" sort={sortP} setSort={setSortP} />
-              <SortTh label="TF" k="tf" sort={sortP} setSort={setSortP} />
-              <SortTh label="St." k="steal" sort={sortP} setSort={setSortP} />
-              <SortTh label="Bl." k="block" sort={sortP} setSort={setSortP} />
-              <SortTh label="2min" k="p2" sort={sortP} setSort={setSortP} />
-              <SortTh label="7m+" k="m7won" sort={sortP} setSort={setSortP} />
-              <SortTh label="7m−" k="m7caused" sort={sortP} setSort={setSortP} />
+              {FIELD_STAT_COLS.map((c) => (
+                <SortTh key={c.key} label={c.short} k={c.key} sort={sortP} setSort={setSortP} />
+              ))}
             </tr></thead>
             <tbody>{rows.map((r) => (
               <tr key={r.id} {...rowProps(r.id)}>
                 <td style={tdNum}>#{r.num === 999 ? "–" : r.num}</td>
                 <td style={{ ...tdName, color: onPlayer ? C.blueDark : C.ink }}>{r.name}</td>
-                <td style={{ ...td, fontWeight: 800, color: C.green }}>{r.goals}</td>
-                <td style={td}>{r.shots}</td>
-                <td style={td}>{r.shots ? r.quote + "%" : "–"}</td>
-                <td style={td}>{fmtMin(r.id)}</td>
-                <td style={td}>{r.assist}</td><td style={td}>{r.tf}</td>
-                <td style={td}>{r.steal}</td><td style={td}>{r.block}</td>
-                <td style={{ ...td, color: r.p2 ? C.red : C.ink }}>{r.p2}</td>
-                <td style={td}>{r.m7won}</td><td style={td}>{r.m7caused}</td>
+                {FIELD_STAT_COLS.map((c) => {
+                  const content = c.percent ? (r.shots ? r.quote + "%" : "–")
+                    : c.isMin ? fmtMin(r.id) : r[c.key];
+                  const style = c.key === "goals" ? { ...td, fontWeight: 800, color: C.green }
+                    : c.key === "p2" ? { ...td, color: r.p2 ? C.red : C.ink } : td;
+                  return <td key={c.key} style={style}>{content}</td>;
+                })}
               </tr>
             ))}</tbody>
           </table>
@@ -2569,19 +2946,19 @@ function StatsTables({ team, agg, onPlayer }) {
             <thead><tr>
               <SortTh label="Nr." k="num" sort={sortK} setSort={setSortK} defaultDir={1} left />
               <SortTh label="Torhüter" k="name" sort={sortK} setSort={setSortK} defaultDir={1} left />
-              <SortTh label="Paraden" k="saves" sort={sortK} setSort={setSortK} />
-              <SortTh label="Gegentore" k="conceded" sort={sortK} setSort={setSortK} />
-              <SortTh label="Quote" k="quote" sort={sortK} setSort={setSortK} />
-              <SortTh label="Min." k="min" sort={sortK} setSort={setSortK} />
+              {KEEPER_STAT_COLS.map((c) => (
+                <SortTh key={c.key} label={c.short} k={c.key} sort={sortK} setSort={setSortK} />
+              ))}
             </tr></thead>
             <tbody>{kRows.map((r) => (
               <tr key={r.id} {...rowProps(r.id)}>
                 <td style={tdNum}>#{r.num === 999 ? "–" : r.num}</td>
                 <td style={{ ...tdName, color: onPlayer ? C.blueDark : C.ink }}>{r.name}</td>
-                <td style={{ ...td, fontWeight: 800, color: C.green }}>{r.saves}</td>
-                <td style={td}>{r.conceded}</td>
-                <td style={td}>{r.quote}%</td>
-                <td style={td}>{fmtMin(r.id)}</td>
+                {KEEPER_STAT_COLS.map((c) => {
+                  const content = c.percent ? r.quote + "%" : c.isMin ? fmtMin(r.id) : r[c.key];
+                  const style = c.key === "saves" ? { ...td, fontWeight: 800, color: C.green } : td;
+                  return <td key={c.key} style={style}>{content}</td>;
+                })}
               </tr>
             ))}</tbody>
           </table>
@@ -2604,6 +2981,20 @@ function StatsTables({ team, agg, onPlayer }) {
           );
         })}
       </Card>
+      {exportCtx && (
+        <Card>
+          <SectionH>Export</SectionH>
+          <div style={{ fontFamily: SANS, fontSize: 13, color: C.sub, marginBottom: 10 }}>
+            Exportiert die aktuell gewählte Auswertung (inkl. Zeitfenster und Tabellen-Sortierung)
+            als Excel-Datei: ein Blatt fürs Team, je ein Blatt pro Spieler.
+          </div>
+          <Btn kind="soft" onClick={() => exportStatsToExcel({
+            team, agg, rows, kRows, zRows, ...exportCtx,
+          })}>
+            Als Excel exportieren ↓
+          </Btn>
+        </Card>
+      )}
     </div>
   );
 }
