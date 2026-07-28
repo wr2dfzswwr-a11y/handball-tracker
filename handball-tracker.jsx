@@ -91,6 +91,16 @@ const KEEPER_STAT_COLS = [
   { key: "quote", label: "Quote", short: "Quote", percent: true },
   { key: "min", label: "Min.", short: "Min.", isMin: true },
 ];
+/* Gesamtzeile (App-Tabelle + Excel-Export): summiert alle Zähl-Spalten.
+   Quote wird aus den Summen neu berechnet, Min. bleibt leer ("–"). */
+const statTotals = (rows, cols) => {
+  const t = {};
+  for (const c of cols) {
+    if (c.percent || c.isMin) continue;
+    t[c.key] = rows.reduce((a, r) => a + (r[c.key] || 0), 0);
+  }
+  return t;
+};
 /* Karten erscheinen nur im Spieler-Detail (App) bzw. Spieler-Blatt (Excel). */
 const PLAYER_CARD_ROWS = [
   { key: "yellow", label: "Gelbe Karten" },
@@ -2584,6 +2594,17 @@ const XL = {
   },
   note: { font: { italic: true, sz: 10, color: { rgb: XL_SUB } } },
   bold: { font: { bold: true, color: { rgb: XL_INK } } },
+  /* Gesamtzeile: fett + dickere Trennlinie oben (wie in der App-Tabelle). */
+  total: {
+    font: { bold: true, color: { rgb: XL_INK } },
+    border: { top: { style: "medium", color: { rgb: XL_INK } } },
+    alignment: { horizontal: "right" },
+  },
+  totalLeft: {
+    font: { bold: true, color: { rgb: XL_INK } },
+    border: { top: { style: "medium", color: { rgb: XL_INK } } },
+    alignment: { horizontal: "left" },
+  },
 };
 const xlText = (v, s) => ({ v: v == null ? "" : String(v), t: "s", ...(s ? { s } : {}) });
 const xlNum = (v, s) => ({ v: v == null ? 0 : v, t: "n", ...(s ? { s } : {}) });
@@ -2658,6 +2679,16 @@ function buildTeamSheet({ team, agg, rows, kRows, zRows, heading }) {
       ),
     ]);
   }
+  if (rows.length > 0) {
+    const t = statTotals(rows, FIELD_STAT_COLS);
+    aoa.push([
+      xlText("–", XL.totalLeft), xlText("Gesamt", XL.totalLeft),
+      ...FIELD_STAT_COLS.map((c) =>
+        c.percent ? xlPct(t.goals, t.shots, XL.total)
+          : c.isMin ? xlText("–", XL.total) : xlNum(t[c.key], XL.total)
+      ),
+    ]);
+  }
   if (agg.minutesTracked < agg.gamesCount) {
     aoa.push([xlText(
       `Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet (${agg.minutesTracked} von ${agg.gamesCount} Spielen).`,
@@ -2678,6 +2709,16 @@ function buildTeamSheet({ team, agg, rows, kRows, zRows, heading }) {
       xlText(r.num === 999 ? "–" : `#${r.num}`), xlText(r.name, XL.bold),
       ...KEEPER_STAT_COLS.map((c) =>
         c.percent ? xlPct(r.saves, r.saves + r.conceded) : c.isMin ? xlMin(r.min) : xlNum(r[c.key])
+      ),
+    ]);
+  }
+  if (kRows.length > 0) {
+    const t = statTotals(kRows, KEEPER_STAT_COLS);
+    aoa.push([
+      xlText("–", XL.totalLeft), xlText("Gesamt", XL.totalLeft),
+      ...KEEPER_STAT_COLS.map((c) =>
+        c.percent ? xlPct(t.saves, t.saves + t.conceded, XL.total)
+          : c.isMin ? xlText("–", XL.total) : xlNum(t[c.key], XL.total)
       ),
     ]);
   }
@@ -2893,6 +2934,15 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
   const td = { fontFamily: MONO, fontSize: 14, color: C.ink, textAlign: "right", padding: "7px 6px", borderTop: `1px solid ${C.line}` };
   const tdName = { ...td, fontFamily: SANS, fontWeight: 700, textAlign: "left" };
   const tdNum = { ...td, color: C.sub, textAlign: "left", width: 40 };
+  /* Gesamtzeile: fett + dickere Trennlinie, fix unten (sortier-unabhängig), nicht klickbar. */
+  const tdTotal = { ...td, fontWeight: 800, borderTop: `2px solid ${C.ink}` };
+  const tdTotalName = { ...tdTotal, fontFamily: SANS, textAlign: "left" };
+  const tdTotalNum = { ...tdTotal, color: C.sub, textAlign: "left", width: 40 };
+  const fTot = statTotals(rows, FIELD_STAT_COLS);
+  const kTot = statTotals(kRows, KEEPER_STAT_COLS);
+  const fTotQuote = fTot.shots ? Math.round((fTot.goals / fTot.shots) * 100) + "%" : "–";
+  const kTotQuote = (kTot.saves + kTot.conceded)
+    ? Math.round((kTot.saves / (kTot.saves + kTot.conceded)) * 100) + "%" : "–";
   const minNote = minutesTracked < gamesCount && (
     <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
       Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet
@@ -2924,7 +2974,17 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
                   return <td key={c.key} style={style}>{content}</td>;
                 })}
               </tr>
-            ))}</tbody>
+            ))}
+            <tr>
+              <td style={tdTotalNum}>–</td>
+              <td style={tdTotalName}>Gesamt</td>
+              {FIELD_STAT_COLS.map((c) => (
+                <td key={c.key} style={tdTotal}>
+                  {c.percent ? fTotQuote : c.isMin ? "–" : fTot[c.key]}
+                </td>
+              ))}
+            </tr>
+            </tbody>
           </table>
         )}
         {onPlayer && rows.length > 0 && (
@@ -2960,7 +3020,17 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
                   return <td key={c.key} style={style}>{content}</td>;
                 })}
               </tr>
-            ))}</tbody>
+            ))}
+            <tr>
+              <td style={tdTotalNum}>–</td>
+              <td style={tdTotalName}>Gesamt</td>
+              {KEEPER_STAT_COLS.map((c) => (
+                <td key={c.key} style={tdTotal}>
+                  {c.percent ? kTotQuote : c.isMin ? "–" : kTot[c.key]}
+                </td>
+              ))}
+            </tr>
+            </tbody>
           </table>
         )}
       </Card>
