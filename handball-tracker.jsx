@@ -3093,22 +3093,354 @@ function readBackup(file, onOk, onErr) {
   r.readAsText(file);
 }
 
+/* ============================================================
+   Cloud-Sync
+   Ein Datensatz pro Team im Cloudflare-KV, erreichbar nur über den Worker.
+   Live-Tracking bleibt vollständig offline – Sync passiert manuell nach dem
+   Spiel (Hochladen) bzw. automatisch beim App-Start (Herunterladen).
+   ============================================================ */
+const CLOUD_KEY = "handball:cloud-v1";
+const EMPTY_CLOUD = { apiBase: "", links: [] };
+/* link: { code, slug, label, role, teamId, baseUpdatedAt, lastSyncAt } */
+
+async function loadCloud() {
+  try {
+    const r = await window.storage.get(CLOUD_KEY);
+    if (r && r.value) {
+      const c = JSON.parse(r.value);
+      return { apiBase: c.apiBase || "", links: Array.isArray(c.links) ? c.links : [] };
+    }
+  } catch {}
+  return clone(EMPTY_CLOUD);
+}
+async function saveCloud(c) {
+  try { await window.storage.set(CLOUD_KEY, JSON.stringify(c)); } catch {}
+}
+
+async function cloudFetch(base, path, code, init = {}) {
+  if (!base) throw new Error("Es ist noch keine Worker-Adresse hinterlegt.");
+  let res;
+  try {
+    res = await fetch(String(base).replace(/\/+$/, "") + path, {
+      ...init,
+      headers: { "X-Access-Code": code, ...(init.body ? { "Content-Type": "application/json" } : {}) },
+    });
+  } catch {
+    throw new Error("Keine Verbindung zur Cloud. Bitte Internetverbindung prüfen.");
+  }
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) {
+    const e = new Error((body && (body.message || body.error)) || `Cloud-Fehler ${res.status}`);
+    e.status = res.status;
+    e.updatedAt = body && body.updatedAt;
+    throw e;
+  }
+  return body;
+}
+const cloudDownload = (base, code) => cloudFetch(base, "/api/team", code);
+const cloudUpload = (base, code, payload, baseUpdatedAt, force) =>
+  cloudFetch(base, "/api/team/sync", code, {
+    method: "POST",
+    body: JSON.stringify({ data: payload, baseUpdatedAt: baseUpdatedAt ?? null, force: !!force }),
+  });
+
+/* Ein Team samt seiner Spiele aus dem lokalen Datensatz herauslösen */
+function teamPayload(data, teamId) {
+  const team = data.teams.find((t) => t.id === teamId);
+  if (!team) return null;
+  return { team: clone(team), games: clone(data.games.filter((g) => g.teamId === teamId)) };
+}
+/* Cloud-Payload einspielen: ersetzt genau dieses Team und dessen Spiele */
+function applyPayload(data, payload) {
+  if (!payload || !payload.team || !payload.team.id) return data;
+  const n = clone(data);
+  const tid = payload.team.id;
+  const i = n.teams.findIndex((t) => t.id === tid);
+  if (i >= 0) n.teams[i] = clone(payload.team); else n.teams.push(clone(payload.team));
+  // Reihenfolge der Spieleliste bleibt erhalten: bekannte Spiele werden an Ort und
+  // Stelle ersetzt, in der Cloud gelöschte entfernt, neue hinten angehängt.
+  const incoming = new Map((payload.games || []).map((g) => [g.id, clone(g)]));
+  const games = [];
+  for (const g of n.games) {
+    if (g.teamId !== tid) { games.push(g); continue; }
+    if (incoming.has(g.id)) { games.push(incoming.get(g.id)); incoming.delete(g.id); }
+  }
+  for (const g of incoming.values()) games.push(g);
+  n.games = games;
+  return n;
+}
+const fmtSync = (ms) => {
+  if (!ms) return "noch nie";
+  const d = new Date(ms);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}, ${p(d.getHours())}:${p(d.getMinutes())} Uhr`;
+};
+const ROLE_LABEL = { tracker: "Tracker (lesen & schreiben)", reader: "Leser (nur lesen)" };
+
+/* ---------- Cloud-Bildschirm ---------- */
+function CloudScreen({ data, setData, cloud, setCloud, go }) {
+  const [base, setBase] = useState(cloud.apiBase);
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null); // { kind: "ok"|"err", text }
+  const [addOpen, setAddOpen] = useState(false);
+  const [codeIn, setCodeIn] = useState("");
+  const [pending, setPending] = useState(null); // { code, slug, label, role } – Cloud noch leer
+  const [pickTeam, setPickTeam] = useState("");
+
+  const saveBase = () => {
+    const v = base.trim();
+    setBase(v);
+    setCloud({ ...cloud, apiBase: v });
+    setMsg({ kind: "ok", text: "Worker-Adresse gespeichert." });
+  };
+  const patchLink = (code, patch) =>
+    setCloud({ ...cloud, links: cloud.links.map((l) => (l.code === code ? { ...l, ...patch } : l)) });
+
+  const doUpload = async (link, force = false) => {
+    const payload = teamPayload(data, link.teamId);
+    if (!payload) { setMsg({ kind: "err", text: "Das verknüpfte Team existiert lokal nicht mehr." }); return; }
+    setBusy(link.code); setMsg(null);
+    try {
+      const res = await cloudUpload(cloud.apiBase, link.code, payload, link.baseUpdatedAt, force);
+      patchLink(link.code, { baseUpdatedAt: res.updatedAt, lastSyncAt: Date.now() });
+      setMsg({ kind: "ok", text: `„${link.label}“ wurde in die Cloud hochgeladen.` });
+    } catch (e) {
+      if (e.status === 409) {
+        const ok = window.confirm(
+          "Der Cloud-Stand wurde seit dem letzten Laden von einem anderen Gerät geändert.\n\n" +
+          "OK  = Cloud mit dem Stand dieses Geräts überschreiben\n" +
+          "Abbrechen = nichts tun (dann besser erst herunterladen)"
+        );
+        setBusy(null);
+        if (ok) return doUpload(link, true);
+        setMsg({ kind: "err", text: "Hochladen abgebrochen. Bitte erst den Cloud-Stand herunterladen." });
+        return;
+      }
+      setMsg({ kind: "err", text: e.message });
+    } finally { setBusy(null); }
+  };
+
+  const doDownload = async (link) => {
+    setBusy(link.code); setMsg(null);
+    try {
+      const res = await cloudDownload(cloud.apiBase, link.code);
+      if (!res || !res.data || !res.data.team) {
+        setMsg({ kind: "err", text: "In der Cloud liegen für dieses Team noch keine Daten." });
+        return;
+      }
+      if (!window.confirm(`„${link.label}“ wird durch den Cloud-Stand ersetzt. Nicht hochgeladene Änderungen an diesem Team gehen dabei verloren. Fortfahren?`)) {
+        setMsg({ kind: "err", text: "Herunterladen abgebrochen." });
+        return;
+      }
+      setData((d) => applyPayload(d, res.data));
+      patchLink(link.code, {
+        teamId: res.data.team.id, baseUpdatedAt: res.updatedAt,
+        label: res.label || link.label, role: res.role || link.role, lastSyncAt: Date.now(),
+      });
+      setMsg({ kind: "ok", text: `„${res.label || link.label}“ wurde aus der Cloud geladen.` });
+    } catch (e) {
+      setMsg({ kind: "err", text: e.message });
+    } finally { setBusy(null); }
+  };
+
+  const addCode = async () => {
+    const code = codeIn.trim();
+    if (!/^\d{6}$/.test(code)) { setMsg({ kind: "err", text: "Bitte einen 6-stelligen Zugangscode eingeben." }); return; }
+    if (cloud.links.some((l) => l.code === code)) { setMsg({ kind: "err", text: "Dieser Zugangscode ist bereits verknüpft." }); return; }
+    setBusy("add"); setMsg(null);
+    try {
+      const res = await cloudDownload(cloud.apiBase, code);
+      if (res.data && res.data.team) {
+        setData((d) => applyPayload(d, res.data));
+        setCloud({
+          ...cloud,
+          links: [...cloud.links, {
+            code, slug: res.slug, label: res.label, role: res.role,
+            teamId: res.data.team.id, baseUpdatedAt: res.updatedAt, lastSyncAt: Date.now(),
+          }],
+        });
+        setAddOpen(false); setCodeIn("");
+        setMsg({ kind: "ok", text: `„${res.label}“ verknüpft und geladen.` });
+      } else if (res.role === "tracker") {
+        setPending({ code, slug: res.slug, label: res.label, role: res.role });
+        setPickTeam(data.teams[0] ? data.teams[0].id : "");
+      } else {
+        setMsg({ kind: "err", text: "In der Cloud liegen für dieses Team noch keine Daten. Der Tracker muss zuerst hochladen." });
+      }
+    } catch (e) {
+      setMsg({ kind: "err", text: e.message });
+    } finally { setBusy(null); }
+  };
+
+  const bindAndUpload = async () => {
+    if (!pickTeam) { setMsg({ kind: "err", text: "Bitte ein Team auswählen." }); return; }
+    const payload = teamPayload(data, pickTeam);
+    if (!payload) return;
+    setBusy("add"); setMsg(null);
+    try {
+      const res = await cloudUpload(cloud.apiBase, pending.code, payload, null, true);
+      setCloud({
+        ...cloud,
+        links: [...cloud.links, {
+          code: pending.code, slug: pending.slug, label: pending.label, role: pending.role,
+          teamId: pickTeam, baseUpdatedAt: res.updatedAt, lastSyncAt: Date.now(),
+        }],
+      });
+      setPending(null); setAddOpen(false); setCodeIn("");
+      setMsg({ kind: "ok", text: `„${payload.team.name}“ wurde als Cloud-Team „${pending.label}“ angelegt.` });
+    } catch (e) {
+      setMsg({ kind: "err", text: e.message });
+    } finally { setBusy(null); }
+  };
+
+  return (
+    <div>
+      <PageTitle title="Cloud-Sync" sub="Daten teamweise sichern und auf mehreren Geräten nutzen"
+        onBack={() => go({ name: "teams" })} />
+
+      {msg && (
+        <div style={{
+          marginBottom: 14, padding: "10px 14px", borderRadius: 12, fontFamily: SANS, fontSize: 14, fontWeight: 700,
+          background: msg.kind === "ok" ? C.greenSoft : C.redSoft, color: msg.kind === "ok" ? C.green : C.red,
+        }}>{msg.text}</div>
+      )}
+
+      <Card style={{ marginBottom: 14 }}>
+        <SectionH>Worker-Adresse</SectionH>
+        <Field label="Adresse des Cloudflare-Workers">
+          <input value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://handball-sync.dein-name.workers.dev"
+            style={inputStyle} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+        </Field>
+        <Btn kind="soft" small onClick={saveBase}>Adresse speichern</Btn>
+      </Card>
+
+      <Card>
+        <SectionH>Verknüpfte Teams</SectionH>
+        {cloud.links.length === 0 && <Empty>Noch kein Zugangscode hinterlegt.</Empty>}
+        {cloud.links.map((l) => {
+          const local = data.teams.find((t) => t.id === l.teamId);
+          const on = busy === l.code;
+          return (
+            <div key={l.code} style={{ border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <div style={{ flex: 1, fontFamily: SANS, fontWeight: 800, fontSize: 16, color: C.ink }}>{l.label}</div>
+                <span style={{
+                  fontFamily: SANS, fontSize: 12, fontWeight: 800, padding: "4px 10px", borderRadius: 999,
+                  background: l.role === "tracker" ? C.blueSoft : C.yellowSoft, color: l.role === "tracker" ? C.blueDark : C.yellow,
+                }}>{l.role === "tracker" ? "Tracker" : "Leser"}</span>
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 13, color: C.sub, marginBottom: 10 }}>
+                Code {l.code} · lokal: {local ? local.name : "— Team fehlt —"} · letzter Sync: {fmtSync(l.lastSyncAt)}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {l.role === "tracker" && (
+                  <Btn kind="accent" small disabled={on} onClick={() => doUpload(l)}>
+                    {on ? "…" : "In Cloud hochladen ↑"}
+                  </Btn>
+                )}
+                <Btn kind="soft" small disabled={on} onClick={() => doDownload(l)}>
+                  {on ? "…" : "Aus Cloud laden ↓"}
+                </Btn>
+                <ConfirmBtn label="Trennen" confirmLabel="Wirklich trennen?"
+                  onConfirm={() => setCloud({ ...cloud, links: cloud.links.filter((x) => x.code !== l.code) })} />
+              </div>
+            </div>
+          );
+        })}
+        <Btn kind="primary" small onClick={() => { setAddOpen(true); setMsg(null); }} style={{ marginTop: 4 }}>
+          + Zugangscode hinzufügen
+        </Btn>
+        <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 12, lineHeight: 1.5 }}>
+          Beim Start der App wird der Cloud-Stand automatisch geladen, sofern eine Internetverbindung
+          besteht. Das Hochladen nach dem Spiel startest du hier von Hand. „Trennen“ entfernt nur die
+          Verknüpfung – die Daten auf diesem Gerät und in der Cloud bleiben erhalten.
+        </div>
+      </Card>
+
+      {addOpen && (
+        <Modal title={pending ? "Team zuordnen" : "Zugangscode hinzufügen"}
+          onClose={() => { setAddOpen(false); setPending(null); setCodeIn(""); }}>
+          {!pending && (
+            <>
+              <Field label="6-stelliger Zugangscode">
+                <input value={codeIn} onChange={(e) => setCodeIn(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  inputMode="numeric" placeholder="123456"
+                  style={{ ...inputStyle, fontFamily: MONO, fontSize: 24, letterSpacing: "0.3em", textAlign: "center" }} />
+              </Field>
+              <Btn kind="primary" disabled={busy === "add"} onClick={addCode} style={{ width: "100%" }}>
+                {busy === "add" ? "Prüfe …" : "Verknüpfen"}
+              </Btn>
+            </>
+          )}
+          {pending && (
+            <>
+              <div style={{ fontFamily: SANS, fontSize: 14, color: C.sub, marginBottom: 12, lineHeight: 1.5 }}>
+                Für „{pending.label}“ liegen in der Cloud noch keine Daten. Wähle das lokale Team,
+                das ab jetzt mit diesem Cloud-Team synchronisiert werden soll.
+              </div>
+              <Field label="Lokales Team">
+                <select value={pickTeam} onChange={(e) => setPickTeam(e.target.value)} style={inputStyle}>
+                  {data.teams.length === 0 && <option value="">— keine Teams vorhanden —</option>}
+                  {data.teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+              <Btn kind="accent" disabled={busy === "add" || !pickTeam} onClick={bindAndUpload} style={{ width: "100%" }}>
+                {busy === "add" ? "Lade hoch …" : "Verknüpfen und hochladen"}
+              </Btn>
+            </>
+          )}
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState(null);
+  const [cloud, setCloudState] = useState(null);
+  const [boot, setBoot] = useState("Lade Daten …");
+  const [toast, setToast] = useState(null);
   const [route, setRoute] = useState({ name: "teams" });
-  const loaded = data !== null;
+  const loaded = data !== null && cloud !== null;
   const saveT = useRef(null);
   const skip = useRef(true);
   const fileRef = useRef(null);
 
   useEffect(() => {
     (async () => {
+      let d;
       try {
         const r = await window.storage.get(KEY);
-        setData(r && r.value ? JSON.parse(r.value) : clone(EMPTY));
-      } catch {
-        setData(clone(EMPTY));
+        d = r && r.value ? JSON.parse(r.value) : clone(EMPTY);
+      } catch { d = clone(EMPTY); }
+      const c = await loadCloud();
+      // Cloud-Stand beim Start holen – nur online; Fehler werden still übergangen,
+      // damit die App in der Halle ohne Netz sofort startet.
+      if (c.apiBase && c.links.length && navigator.onLine !== false) {
+        setBoot("Cloud-Stand wird geladen …");
+        let changed = false;
+        for (const link of c.links) {
+          try {
+            const res = await cloudDownload(c.apiBase, link.code);
+            if (res && res.data && res.data.team) {
+              d = applyPayload(d, res.data);
+              link.teamId = res.data.team.id;
+              link.baseUpdatedAt = res.updatedAt;
+              link.label = res.label || link.label;
+              link.role = res.role || link.role;
+              link.lastSyncAt = Date.now();
+              changed = true;
+            }
+          } catch {}
+        }
+        if (changed) {
+          await saveCloud(c);
+          try { await window.storage.set(KEY, JSON.stringify(d)); } catch {}
+        }
       }
+      setCloudState(c);
+      setData(d);
     })();
   }, []);
 
@@ -3122,13 +3454,25 @@ export default function App() {
     return () => clearTimeout(saveT.current);
   }, [data, loaded]);
 
-  const update = (fn) => setData((d) => { const n = clone(d); fn(n); return n; });
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2600);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Nur-Lese-Modus: greift, sobald das Gerät ausschließlich Leser-Codes hinterlegt hat.
+  const readOnly = !!cloud && cloud.links.length > 0 && cloud.links.every((l) => l.role === "reader");
+  const setCloud = (next) => { setCloudState(next); saveCloud(next); };
+  const update = (fn) => {
+    if (readOnly) { setToast("Nur-Lese-Zugang – Änderungen sind nicht möglich."); return; }
+    setData((d) => { const n = clone(d); fn(n); return n; });
+  };
   const go = (r) => setRoute(r);
 
   if (!loaded) {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SANS, color: C.sub }}>
-        Lade Daten …
+        {boot}
       </div>
     );
   }
@@ -3141,7 +3485,13 @@ export default function App() {
         <span onClick={() => go({ name: "teams" })} style={{ cursor: "pointer", fontFamily: SANS, fontWeight: 900, fontSize: 16, color: "#fff", letterSpacing: "-0.01em" }}>
           🤾 Handball-Tracker
         </span>
-        <span style={{ flex: 1, fontFamily: SANS, fontSize: 12, color: "#7E93B8" }}>Saison-Statistik live vom Spielfeldrand</span>
+        <span style={{ flex: 1, fontFamily: SANS, fontSize: 12, color: readOnly ? C.yellow : "#7E93B8" }}>
+          {readOnly ? "Nur-Lese-Zugang" : "Saison-Statistik live vom Spielfeldrand"}
+        </span>
+        <button onClick={() => go({ name: "cloud" })} title="Cloud-Sync"
+          style={{ ...btnBase, padding: "6px 10px", fontSize: 12, background: "rgba(255,255,255,0.12)", color: "#fff" }}>
+          ☁ Cloud
+        </button>
         <button onClick={() => downloadBackup(data)} title="Daten als JSON-Datei sichern"
           style={{ ...btnBase, padding: "6px 10px", fontSize: 12, background: "rgba(255,255,255,0.12)", color: "#fff" }}>
           Backup ↓
@@ -3155,6 +3505,7 @@ export default function App() {
             const f = e.target.files && e.target.files[0];
             e.target.value = "";
             if (!f) return;
+            if (readOnly) { setToast("Nur-Lese-Zugang – Import ist nicht möglich."); return; }
             if (!window.confirm("Import ersetzt alle aktuellen Daten auf diesem Gerät. Fortfahren?")) return;
             readBackup(f,
               (d) => { setData(d); go({ name: "teams" }); },
@@ -3168,7 +3519,15 @@ export default function App() {
         {route.name === "live" && <LiveScreen data={data} update={update} go={go} teamId={route.teamId} gameId={route.gameId} />}
         {route.name === "review" && <ReviewScreen data={data} update={update} go={go} teamId={route.teamId} gameId={route.gameId} />}
         {route.name === "player" && <PlayerScreen data={data} go={go} teamId={route.teamId} playerId={route.playerId} init={route.init} back={route.back} />}
+        {route.name === "cloud" && <CloudScreen data={data} setData={setData} cloud={cloud} setCloud={setCloud} go={go} />}
       </div>
+      {toast && (
+        <div style={{
+          position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 20, zIndex: 60,
+          background: C.navy, color: "#fff", fontFamily: SANS, fontSize: 14, fontWeight: 700,
+          padding: "10px 18px", borderRadius: 999, boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+        }}>{toast}</div>
+      )}
     </div>
   );
 }

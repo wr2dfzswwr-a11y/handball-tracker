@@ -1,4 +1,4 @@
-const CACHE = "handball-tracker-v14";
+const CACHE = "handball-tracker-v15";
 const ASSETS = [
   "./",
   "./index.html",
@@ -26,6 +26,8 @@ self.addEventListener("activate", (e) => {
 // Netz zuerst (damit Updates ankommen), sonst Cache (offline nutzbar)
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
+  // Cloud-API nie cachen – sonst würde ein veralteter Stand offline ausgeliefert.
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {
