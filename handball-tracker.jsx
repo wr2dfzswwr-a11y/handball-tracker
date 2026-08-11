@@ -947,34 +947,111 @@ function TeamScreen({ data, update, go, teamId, tab }) {
 }
 
 /* ---------- Kader ---------- */
+const byNumber = (a, b) => (parseInt(a.number) || 99) - (parseInt(b.number) || 99);
+
+/* Modulebene, damit der Edit-State beim Tippen nicht durch Remount verloren geht. */
+function PlayerRow({ p, editing, draft, dupWith, onStartEdit, onDraft, onSave, onCancel, onDelete }) {
+  return (
+    <div style={{ padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {editing ? (
+          <input
+            autoFocus
+            inputMode="numeric"
+            value={draft}
+            placeholder="Nr."
+            onChange={(e) => onDraft(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onSave();
+              else if (e.key === "Escape") onCancel();
+            }}
+            style={{
+              ...inputStyle, width: 62, padding: "6px 6px", textAlign: "center",
+              fontFamily: MONO, fontWeight: 700,
+              borderColor: dupWith ? C.orange : C.line,
+            }}
+          />
+        ) : (
+          <span style={{
+            fontFamily: MONO, fontWeight: 700, fontSize: 15, color: "#fff", background: p.pos === "TW" ? C.orange : C.blue,
+            borderRadius: 8, minWidth: 34, textAlign: "center", padding: "5px 0",
+          }}>{p.number}</span>
+        )}
+        <span style={{ flex: 1, fontFamily: SANS, fontSize: 15, fontWeight: 600, color: C.ink }}>{p.name}</span>
+        {editing ? (
+          <>
+            <Btn kind="green" small onClick={onSave} title="Speichern">✓</Btn>
+            <Btn kind="ghost" small onClick={onCancel} title="Abbrechen">✕</Btn>
+          </>
+        ) : (
+          <>
+            <Btn kind="soft" small onClick={onStartEdit} title={`Nummer von ${p.name} ändern`}>✎</Btn>
+            <ConfirmBtn onConfirm={onDelete} />
+          </>
+        )}
+      </div>
+      {editing && dupWith && (
+        <div style={{ fontFamily: SANS, fontSize: 12, color: C.orange, marginTop: 6 }}>
+          Nr. {draft.trim()} hat bereits {dupWith}. Speichern ist trotzdem möglich.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RosterTab({ team, update }) {
   const [name, setName] = useState("");
   const [number, setNumber] = useState("");
   const [pos, setPos] = useState("F");
+  const [editId, setEditId] = useState(null);
+  const [draft, setDraft] = useState("");
   const add = () => {
     const n = name.trim();
     if (!n) return;
     update((d) => {
       const t = d.teams.find((x) => x.id === team.id);
       t.players.push({ id: uid(), name: n, number: number.trim() || "?", pos });
-      t.players.sort((a, b) => (parseInt(a.number) || 99) - (parseInt(b.number) || 99));
+      t.players.sort(byNumber);
     });
     setName(""); setNumber("");
   };
+  const startEdit = (p) => { setEditId(p.id); setDraft(p.number === "?" ? "" : String(p.number)); };
+  const cancelEdit = () => { setEditId(null); setDraft(""); };
+  const saveEdit = (p) => {
+    const nr = draft.trim() || "?";
+    update((d) => {
+      const t = d.teams.find((x) => x.id === team.id);
+      const pl = t.players.find((x) => x.id === p.id);
+      if (pl) pl.number = nr;
+      t.players.sort(byNumber);
+    });
+    cancelEdit();
+  };
+  const dupFor = (p) => {
+    const nr = draft.trim();
+    if (!nr || nr === "?") return null;
+    const other = team.players.find((x) => x.id !== p.id && String(x.number).trim() === nr);
+    return other ? other.name : null;
+  };
   const field = team.players.filter((p) => p.pos === "F");
   const keepers = team.players.filter((p) => p.pos === "TW");
-  const PlayerRow = ({ p }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
-      <span style={{
-        fontFamily: MONO, fontWeight: 700, fontSize: 15, color: "#fff", background: p.pos === "TW" ? C.orange : C.blue,
-        borderRadius: 8, minWidth: 34, textAlign: "center", padding: "5px 0",
-      }}>{p.number}</span>
-      <span style={{ flex: 1, fontFamily: SANS, fontSize: 15, fontWeight: 600, color: C.ink }}>{p.name}</span>
-      <ConfirmBtn onConfirm={() => update((d) => {
+  const row = (p) => (
+    <PlayerRow
+      key={p.id}
+      p={p}
+      editing={editId === p.id}
+      draft={draft}
+      dupWith={editId === p.id ? dupFor(p) : null}
+      onStartEdit={() => startEdit(p)}
+      onDraft={setDraft}
+      onSave={() => saveEdit(p)}
+      onCancel={cancelEdit}
+      onDelete={() => update((d) => {
         const t = d.teams.find((x) => x.id === team.id);
         t.players = t.players.filter((x) => x.id !== p.id);
-      })} />
-    </div>
+      })}
+    />
   );
   return (
     <div style={{ display: "grid", gap: 14 }}>
@@ -994,11 +1071,11 @@ function RosterTab({ team, update }) {
       </Card>
       <Card>
         <SectionH>Feldspieler ({field.length})</SectionH>
-        {field.length === 0 ? <Empty>Noch keine Feldspieler.</Empty> : field.map((p) => <PlayerRow key={p.id} p={p} />)}
+        {field.length === 0 ? <Empty>Noch keine Feldspieler.</Empty> : field.map(row)}
       </Card>
       <Card>
         <SectionH>Torhüter ({keepers.length})</SectionH>
-        {keepers.length === 0 ? <Empty>Noch keine Torhüter.</Empty> : keepers.map((p) => <PlayerRow key={p.id} p={p} />)}
+        {keepers.length === 0 ? <Empty>Noch keine Torhüter.</Empty> : keepers.map(row)}
       </Card>
     </div>
   );
