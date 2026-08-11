@@ -116,6 +116,22 @@ const POS_LABEL = {
 };
 const P2_SECONDS = 120;
 
+/* ---------- Spielfeld-Situationen (Über-/Unterzahl) ----------
+   Rekonstruiert aus den Strafzeit-Aktionen beider Seiten, NICHT aus der
+   Aufstellung: `game.penalties` wird beim Ablaufen der Strafe geleert und bei
+   Rot/Blau ohne benannten Ersatzspieler bleibt der Lineup-Slot dauerhaft leer –
+   beides würde die Feldstärke verfälschen. Die Aktionen selbst bleiben dagegen
+   dauerhaft erhalten und liegen für beide Seiten symmetrisch vor. */
+const SITUATIONS = [
+  { key: "all", label: "Alle Situationen", short: "Alle" },
+  { key: "even6", label: "Gleichzahl 6v6", short: "6v6" },
+  { key: "even5", label: "Gleichzahl 5v5 (beide dezimiert)", short: "5v5" },
+  { key: "up", label: "Überzahl (6v5, 6v4)", short: "Überzahl" },
+  { key: "down", label: "Unterzahl (5v6, 4v6)", short: "Unterzahl" },
+];
+const SITUATION_LABEL = Object.fromEntries(SITUATIONS.map((s) => [s.key, s.label]));
+const SITUATION_SHORT = Object.fromEntries(SITUATIONS.map((s) => [s.key, s.short]));
+
 /* ---------- Taktiktafel: Formationen ---------- */
 const ATTACK_FORMATIONS = ["5:1", "4:2", "6:0"];
 const DEFENSE_FORMATIONS = ["6:0", "5:1", "3:2:1"];
@@ -763,13 +779,52 @@ function playerLabel(team, id) {
   const p = team.players.find((x) => x.id === id);
   return p ? `#${p.number} ${p.name}` : "Unbekannt";
 }
+/* ---------- Spielfeld-Situation über die Zeit ----------
+   Liefert lückenlose, zusammenhängende Segmente { from, to, sit } über das ganze
+   Spiel. Eine Strafe wirkt von `sec` bis `sec + P2_SECONDS`; Rot/Blau verhalten
+   sich für die Feldstärke wie eine 2-min-Strafe (Ersatz nach zwei Minuten),
+   Gelb ist keine Feldstärke-Änderung und wird ignoriert. */
+export function situationSegments(game) {
+  const own = [], opp = [];
+  for (const a of game.actions || []) {
+    if (a.type === "oppPenalty") opp.push(a.sec || 0);
+    else if (a.type === "penalty" && a.kind !== "yellow") own.push(a.sec || 0);
+  }
+  const pts = new Set([0]);
+  for (const s of [...own, ...opp]) { pts.add(s); pts.add(s + P2_SECONDS); }
+  const bounds = [...pts].sort((a, b) => a - b);
+  const active = (arr, t) => arr.filter((s) => s <= t && t < s + P2_SECONDS).length;
+  const segs = [];
+  for (let i = 0; i < bounds.length; i++) {
+    const from = bounds[i], to = i + 1 < bounds.length ? bounds[i + 1] : Infinity;
+    if (to <= from) continue;
+    const ownN = active(own, from), oppN = active(opp, from);
+    const d = oppN - ownN;
+    // Gleichstand: 6v6 (niemand draußen) und 5v5 (beide dezimiert) sind getrennte
+    // Situationen – 4v4 fällt bewusst mit in "even5".
+    const sit = d > 0 ? "up" : d < 0 ? "down" : ownN > 0 ? "even5" : "even6";
+    const last = segs[segs.length - 1];
+    if (last && last.sit === sit) last.to = to; else segs.push({ from, to, sit });
+  }
+  return segs;
+}
+export function situationAt(segs, sec) {
+  const t = sec || 0;
+  const s = segs.find((x) => t >= x.from && t < x.to);
+  return s ? s.sit : "even6";
+}
+
 /* opts:
    - fromSec/toSec: Zeitfenster – nur Aktionen mit fromSec <= sec < toSec zählen,
      Spielzeit wird auf das Fenster begrenzt (Wechsel-Historie bleibt vollständig).
-   - endSec: explizites Spielende (z. B. aktueller Timer bei Live-Statistik). */
+   - endSec: explizites Spielende (z. B. aktueller Timer bei Live-Statistik).
+   - situation: "all" (Standard) | "even6" | "even5" | "up" | "down" – zählt nur
+     Aktionen aus der jeweiligen Situation; die Spielzeit wird auf die passenden
+     Segmente beschnitten, damit die Minuten-Spalte zum Rest der Zeile passt. */
 export function aggregate(team, games, opts = {}) {
   const fromSec = opts.fromSec || 0;
   const toSec = opts.toSec == null ? Infinity : opts.toSec;
+  const situation = opts.situation || "all";
   const inWin = (s) => (s || 0) >= fromSec && (s || 0) < toSec;
   const P = {}; // Feldstatistik pro Spieler
   const K = {}; // Torhüter
@@ -779,15 +834,22 @@ export function aggregate(team, games, opts = {}) {
   const R = {}; // Kader-Einsätze: Anzahl Spiele im Filter, in denen der Spieler im Kader stand
   let minutesTracked = 0;
   let oppP2 = 0; // gegnerische 2-min-Strafen (Überzahl-Situationen)
+  let situationSec = 0; // Dauer der gewählten Situation im Zeitfenster (Stichprobengröße)
+  let situationCount = 0; // Anzahl zusammenhängender Abschnitte dieser Situation
   const ensureP = (id) => (P[id] ||= { goals: 0, shots: 0, assist: 0, tf: 0, steal: 0, block: 0, p2: 0, yellow: 0, red: 0, blue: 0, m7won: 0, m7caused: 0 });
   const ensureK = (id) => (K[id] ||= { saves: 0, conceded: 0 });
   for (const g of games) {
     for (const id of g.roster || []) R[id] = (R[id] || 0) + 1;
+    const segs = situation === "all" ? null : situationSegments(g);
     for (const a of g.actions || []) {
       if (!inWin(a.sec)) continue;
       if (a.type === "oppPenalty") {
+        // Kontextzahl: bewusst nur über das Zeitfenster, nicht über die Situation.
         oppP2++;
-      } else if (a.type === "throw") {
+        continue;
+      }
+      if (segs && situationAt(segs, a.sec) !== situation) continue;
+      if (a.type === "throw") {
         if (a.side === "us") {
           const s = ensureP(a.playerId);
           s.shots++; if (a.result === "goal") s.goals++;
@@ -805,14 +867,28 @@ export function aggregate(team, games, opts = {}) {
         ensureP(a.playerId)[a.type]++;
       }
     }
+    const end = Math.min(opts.endSec != null ? opts.endSec : gameEndSec(g), toSec);
+    /* Zeitfenster ∩ Situation: bei "all" ein Fenster, sonst je passendem Segment
+       eines. `lineupAndMinutes` spielt die Wechsel-Historie bei jedem Aufruf
+       vollständig ab und rekonstruiert die Aufstellung an der unteren
+       Fenstergrenze – mehrere Fenster sind daher unkritisch. */
+    const windows = segs
+      ? segs.filter((s) => s.sit === situation)
+          .map((s) => [Math.max(s.from, fromSec), Math.min(s.to, end)])
+          .filter(([a, b]) => b > a)
+      : [[fromSec, end]];
+    if (segs) {
+      for (const [ws, we] of windows) { situationSec += we - ws; situationCount++; }
+    }
     if (g.startLineup) {
       minutesTracked++;
-      const end = Math.min(opts.endSec != null ? opts.endSec : gameEndSec(g), toSec);
-      const { minutes, minutesByPos } = lineupAndMinutes(g, end, fromSec);
-      for (const [id, s] of Object.entries(minutes || {})) M[id] = (M[id] || 0) + s;
-      for (const [id, per] of Object.entries(minutesByPos || {})) {
-        const t = (MP[id] ||= {});
-        for (const [pos, s] of Object.entries(per)) t[pos] = (t[pos] || 0) + s;
+      for (const [ws, we] of windows) {
+        const { minutes, minutesByPos } = lineupAndMinutes(g, we, ws);
+        for (const [id, s] of Object.entries(minutes || {})) M[id] = (M[id] || 0) + s;
+        for (const [id, per] of Object.entries(minutesByPos || {})) {
+          const t = (MP[id] ||= {});
+          for (const [pos, s] of Object.entries(per)) t[pos] = (t[pos] || 0) + s;
+        }
       }
     }
   }
@@ -821,7 +897,10 @@ export function aggregate(team, games, opts = {}) {
     const pl = team.players.find((p) => p.id === id);
     if (pl?.pos === "TW") ensureK(id); else ensureP(id);
   }
-  return { P, K, Z, M, MP, R, minutesTracked, gamesCount: games.length, oppP2 };
+  return {
+    P, K, Z, M, MP, R, minutesTracked, gamesCount: games.length, oppP2,
+    situation, situationSec, situationCount,
+  };
 }
 
 /* ---------- Aktion als Text (Spielverlauf) ---------- */
@@ -2456,11 +2535,20 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
   const [sel, setSel] = useState(validInit ? init.sel : "all");
   const [fromMin, setFromMin] = useState(init.fromMin || 0);
   const [toMin, setToMin] = useState(init.toMin == null ? 60 : init.toMin);
-  const fs = statsFilterState(games, sel, fromMin, toMin);
+  const [situation, setSituation] = useState(
+    SITUATIONS.some((x) => x.key === init.situation) ? init.situation : "all"
+  );
+  const fs = statsFilterState(games, sel, fromMin, toMin, situation);
   const { source, winOpts } = fs;
   const agg = useMemo(
     () => (team ? aggregate(team, source, winOpts) : { P: {}, K: {}, M: {}, MP: {}, R: {}, minutesTracked: 0, gamesCount: 0 }),
-    [team, games, sel, fromMin, toMin]
+    [team, games, sel, fromMin, toMin, situation]
+  );
+  /* Wurfbild folgt demselben Filter wie die Zahlen darüber (zuvor wurde hier die
+     ungefilterte Spieleliste übergeben, sodass das Zeitfenster ignoriert wurde). */
+  const heatGames = useMemo(
+    () => filterHeatGames(source, fs),
+    [team, games, sel, fromMin, toMin, situation]
   );
   if (!team || !player) return <Empty>Spieler nicht gefunden.</Empty>;
 
@@ -2503,6 +2591,7 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
       />
       <StatsFilterCard games={games} sel={sel} setSel={setSel}
         fromMin={fromMin} setFromMin={setFromMin} toMin={toMin} setToMin={setToMin} fs={fs} />
+      <SituationFilterCard situation={situation} setSituation={setSituation} agg={agg} />
       {source.length === 0 ? <Empty>Keine Spiele im gewählten Zeitraum.</Empty> : !hasAny ? (
         <Empty>Keine Daten für {player.name} im gewählten Zeitraum.</Empty>
       ) : (
@@ -2573,7 +2662,7 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
               </div>
             </Card>
           )}
-          <PlayerThrowZoneCard games={source} player={player} />
+          <PlayerThrowZoneCard games={heatGames} player={player} />
         </>
       )}
     </div>
@@ -2581,7 +2670,7 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
 }
 
 /* ---------- Statistik-Filter (gemeinsam für Statistik-Tab und Spieleransicht) ---------- */
-function statsFilterState(games, sel, fromMin, toMin) {
+function statsFilterState(games, sel, fromMin, toMin, situation = "all") {
   const finished = games.filter((g) => g.status === "finished" && !g.test);
   const finishedTests = games.filter((g) => g.status === "finished" && g.test);
   const source =
@@ -2592,8 +2681,67 @@ function statsFilterState(games, sel, fromMin, toMin) {
   const rangeValid = fromMin < toMin;
   const fromSec = fromMin * 60;
   const toSec = toMin >= 60 ? Infinity : toMin * 60;
-  const winOpts = rangeActive && rangeValid ? { fromSec, toSec } : {};
-  return { finished, finishedTests, source, rangeActive, rangeValid, fromSec, toSec, winOpts };
+  const rangeOn = rangeActive && rangeValid;
+  const sitOn = situation && situation !== "all";
+  const winOpts = {
+    ...(rangeOn ? { fromSec, toSec } : {}),
+    ...(sitOn ? { situation } : {}),
+  };
+  return { finished, finishedTests, source, rangeActive, rangeValid, rangeOn, sitOn, situation, fromSec, toSec, winOpts };
+}
+/* Für Heatmap/Wurfbild: Aktionen auf Zeitfenster UND Situation begrenzen
+   (flache Kopie, Originaldaten bleiben unberührt). `computeHeat` bleibt damit
+   unverändert – die Filterung passiert wie bisher an der Datenquelle. */
+function filterHeatGames(source, { rangeOn, sitOn, fromSec, toSec, situation }) {
+  if (!rangeOn && !sitOn) return source;
+  return source.map((g) => {
+    const segs = sitOn ? situationSegments(g) : null;
+    return {
+      ...g,
+      actions: (g.actions || []).filter((a) => {
+        const s = a.sec || 0;
+        if (rangeOn && !(s >= fromSec && s < toSec)) return false;
+        if (segs && situationAt(segs, s) !== situation) return false;
+        return true;
+      }),
+    };
+  });
+}
+/* Dropdown „Spielfeld-Situation" + Stichproben-Hinweis. Der Hinweis ist wichtig:
+   eine Quote von 100 % aus zwei Würfen sieht sonst aus wie ein Ergebnis. */
+function SituationFilterCard({ situation, setSituation, agg }) {
+  const sitOn = situation !== "all";
+  const sec = agg?.situationSec || 0;
+  const cnt = agg?.situationCount || 0;
+  return (
+    <Card>
+      <SectionH>Spielfeld-Situation</SectionH>
+      <select style={inputStyle} value={situation} onChange={(e) => setSituation(e.target.value)}>
+        {SITUATIONS.map((s) => (
+          <option key={s.key} value={s.key}>{s.label}</option>
+        ))}
+      </select>
+      {sitOn && (
+        <div style={{ fontFamily: SANS, fontSize: 12, color: sec > 0 ? C.sub : C.red, marginTop: 8 }}>
+          {sec > 0 ? (
+            <>
+              {SITUATION_SHORT[situation]} im gewählten Zeitraum:{" "}
+              <b style={{ color: C.ink, fontFamily: MONO }}>{fmtClock(Math.round(sec))} Min</b>
+              {" "}({cnt} {cnt === 1 ? "Abschnitt" : "Abschnitte"}) – Zahlen entsprechend vorsichtig lesen.
+            </>
+          ) : (
+            <>Diese Situation kam im gewählten Zeitraum nicht vor.</>
+          )}
+        </div>
+      )}
+      {sitOn && (
+        <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 6 }}>
+          Ermittelt aus den erfassten Strafzeiten beider Teams (je {P2_SECONDS / 60} Minuten).
+          Gelbe Karten zählen nicht.
+        </div>
+      )}
+    </Card>
+  );
 }
 function StatsFilterCard({ games, sel, setSel, fromMin, setFromMin, toMin, setToMin, fs }) {
   const { finished, finishedTests, source, rangeActive, rangeValid } = fs;
@@ -2699,17 +2847,18 @@ const sanitizeSheetName = (s, used) => {
   return name;
 };
 
-export function exportFileName(games, sel) {
+export function exportFileName(games, sel, situation = "all") {
   const today = fmtDate(todayISO());
-  if (sel === "all") return sanitizeFileName(`Saison-Pflichtspiele – Export ${today}`);
-  if (sel === "tests") return sanitizeFileName(`Testspiele – Export ${today}`);
+  const suf = situation && situation !== "all" ? ` – ${SITUATION_SHORT[situation]}` : "";
+  if (sel === "all") return sanitizeFileName(`Saison-Pflichtspiele – Export ${today}${suf}`);
+  if (sel === "tests") return sanitizeFileName(`Testspiele – Export ${today}${suf}`);
   const g = games.find((x) => x.id === sel);
-  if (!g) return sanitizeFileName(`Statistik – Export ${today}`);
-  return sanitizeFileName(`${g.opponent} – ${fmtDate(g.date)}${g.test ? " (Test)" : ""}`);
+  if (!g) return sanitizeFileName(`Statistik – Export ${today}${suf}`);
+  return sanitizeFileName(`${g.opponent} – ${fmtDate(g.date)}${g.test ? " (Test)" : ""}${suf}`);
 }
 
 /* Überschrift + Untertitel je nach Filterzustand (Kontext auf jedem Blatt). */
-function exportHeading(team, games, sel, gamesCount, rangeActive, fromMin, toMin) {
+function exportHeading(team, games, sel, gamesCount, rangeActive, fromMin, toMin, situation = "all", agg) {
   const g = games.find((x) => x.id === sel);
   const title =
     sel === "all" ? "Saison – alle beendeten Pflichtspiele" :
@@ -2717,6 +2866,10 @@ function exportHeading(team, games, sel, gamesCount, rangeActive, fromMin, toMin
     g ? `${g.opponent} – ${fmtDate(g.date)}${g.test ? " (Testspiel)" : ""}` : "Statistik";
   const parts = [team.name, `${gamesCount} Spiel${gamesCount === 1 ? "" : "e"}`];
   if (rangeActive) parts.push(`Minute ${fromMin + 1}–${toMin}${toMin >= 60 ? " (bis Spielende)" : ""}`);
+  if (situation && situation !== "all") {
+    const sec = agg?.situationSec || 0;
+    parts.push(`${SITUATION_LABEL[situation]}${sec > 0 ? ` (${fmtClock(Math.round(sec))} Min)` : ""}`);
+  }
   parts.push(`Exportiert am ${fmtDate(todayISO())}`);
   return { title, subtitle: parts.join(" · ") };
 }
@@ -2882,8 +3035,8 @@ function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
   return ws;
 }
 
-export function buildExportWorkbook({ team, games, sel, fromMin, toMin, rangeActive, agg, rows, kRows, zRows, heatGames }) {
-  const heading = exportHeading(team, games, sel, agg.gamesCount, rangeActive, fromMin, toMin);
+export function buildExportWorkbook({ team, games, sel, fromMin, toMin, rangeActive, situation = "all", agg, rows, kRows, zRows, heatGames }) {
+  const heading = exportHeading(team, games, sel, agg.gamesCount, rangeActive, fromMin, toMin, situation, agg);
   const wb = XLSX.utils.book_new();
   const used = new Set();
   XLSX.utils.book_append_sheet(wb, buildTeamSheet({ team, agg, rows, kRows, zRows, heading }), sanitizeSheetName("Team", used));
@@ -2897,7 +3050,7 @@ export function buildExportWorkbook({ team, games, sel, fromMin, toMin, rangeAct
     const ws = buildPlayerSheet({ player, agg, heat, heading, seasonScope });
     XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName(`#${player.number} ${player.name}`, used));
   }
-  return { wb, fileName: exportFileName(games, sel) };
+  return { wb, fileName: exportFileName(games, sel, situation) };
 }
 
 function exportStatsToExcel(payload) {
@@ -2909,23 +3062,21 @@ export function StatsTab({ team, games, go, teamId }) {
   const [sel, setSel] = useState("all");
   const [fromMin, setFromMin] = useState(0);  // Zeitfenster: von Minute (0–59)
   const [toMin, setToMin] = useState(60);     // bis Minute (60 = bis Spielende)
-  const fs = statsFilterState(games, sel, fromMin, toMin);
-  const { source, rangeActive, rangeValid, fromSec, toSec, winOpts } = fs;
+  const [situation, setSituation] = useState("all"); // Über-/Unterzahl-Filter
+  const fs = statsFilterState(games, sel, fromMin, toMin, situation);
+  const { source, rangeActive, rangeValid, winOpts } = fs;
 
-  const agg = useMemo(() => aggregate(team, source, winOpts), [team, games, sel, fromMin, toMin]);
-  // Für die Heatmap: Aktionen auf das Zeitfenster begrenzen (flache Kopie, Originaldaten bleiben unberührt)
-  const heatGames = useMemo(() => {
-    if (!rangeActive || !rangeValid) return source;
-    return source.map((g) => ({
-      ...g,
-      actions: (g.actions || []).filter((a) => (a.sec || 0) >= fromSec && (a.sec || 0) < toSec),
-    }));
-  }, [team, games, sel, fromMin, toMin]);
+  const agg = useMemo(() => aggregate(team, source, winOpts), [team, games, sel, fromMin, toMin, situation]);
+  // Heatmap: Aktionen auf Zeitfenster UND Situation begrenzen
+  const heatGames = useMemo(
+    () => filterHeatGames(source, fs),
+    [team, games, sel, fromMin, toMin, situation]
+  );
 
   const onPlayer = go
     ? (pid) => go({
         name: "player", teamId, playerId: pid,
-        init: { sel, fromMin, toMin },
+        init: { sel, fromMin, toMin, situation },
         back: { name: "team", teamId, tab: "stats" },
       })
     : undefined;
@@ -2934,11 +3085,12 @@ export function StatsTab({ team, games, go, teamId }) {
     <div style={{ display: "grid", gap: 14 }}>
       <StatsFilterCard games={games} sel={sel} setSel={setSel}
         fromMin={fromMin} setFromMin={setFromMin} toMin={toMin} setToMin={setToMin} fs={fs} />
+      <SituationFilterCard situation={situation} setSituation={setSituation} agg={agg} />
       {source.length === 0 ? <Empty>Noch keine Daten. Beende zuerst ein Spiel.</Empty> : (
         <>
           <HeatmapSection team={team} games={heatGames} />
           <StatsTables team={team} agg={agg} onPlayer={onPlayer}
-            exportCtx={{ games, sel, fromMin, toMin, rangeActive: rangeActive && rangeValid, heatGames }} />
+            exportCtx={{ games, sel, fromMin, toMin, situation, rangeActive: rangeActive && rangeValid, heatGames }} />
         </>
       )}
     </div>
@@ -2997,7 +3149,7 @@ const cmpFieldDefault = (a, b) => b.goals - a.goals || b.shots - a.shots || a.nu
 const cmpKeeperDefault = (a, b) => b.saves - a.saves || a.num - b.num;
 
 export function StatsTables({ team, agg, onPlayer, exportCtx }) {
-  const { M = {}, minutesTracked = 0, gamesCount = 0, oppP2 = 0 } = agg;
+  const { M = {}, minutesTracked = 0, gamesCount = 0, oppP2 = 0, situation = "all" } = agg;
   const rowProps = (id) => onPlayer
     ? { onClick: () => onPlayer(id), style: { cursor: "pointer" }, title: "Antippen für Spieler-Details" }
     : {};
@@ -3024,6 +3176,11 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
     <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
       Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet
       ({minutesTracked} von {gamesCount} Spielen).
+    </div>
+  );
+  const sitNote = situation !== "all" && (
+    <div style={{ fontFamily: SANS, fontSize: 12, color: C.blueDark, marginTop: 8, fontWeight: 700 }}>
+      Gefiltert auf: {SITUATION_LABEL[situation]} – „Min." zählt ebenfalls nur die Zeit in dieser Situation.
     </div>
   );
   return (
@@ -3070,6 +3227,7 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
           </div>
         )}
         {minNote}
+        {sitNote}
         {oppP2 > 0 && (
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
             Gegner: <b style={{ color: C.red }}>{oppP2} × 2-Minuten-Strafe</b> (Überzahl-Situationen) im gewählten Zeitraum.
