@@ -84,23 +84,60 @@ const FIELD_STAT_COLS = [
   { key: "p2", label: "2 Minuten", short: "2min" },
   { key: "m7won", label: "7m herausgeholt", short: "7m+" },
   { key: "m7caused", label: "7m verursacht", short: "7m−" },
+  { key: "pm", label: "+/-", short: "+/-", isPM: true },
+  { key: "pm60", label: "+/- pro 60 Min", short: "+/-/60", isPM60: true },
 ];
 const KEEPER_STAT_COLS = [
   { key: "saves", label: "Paraden", short: "Paraden" },
   { key: "conceded", label: "Gegentore", short: "Gegentore" },
   { key: "quote", label: "Quote", short: "Quote", percent: true },
   { key: "min", label: "Min.", short: "Min.", isMin: true },
+  { key: "pm", label: "+/-", short: "+/-", isPM: true },
+  { key: "pm60", label: "+/- pro 60 Min", short: "+/-/60", isPM60: true },
 ];
 /* Gesamtzeile (App-Tabelle + Excel-Export): summiert alle Zähl-Spalten.
    Quote wird aus den Summen neu berechnet, Min. bleibt leer ("–"). */
 const statTotals = (rows, cols) => {
   const t = {};
   for (const c of cols) {
-    if (c.percent || c.isMin) continue;
+    if (c.percent || c.isMin || c.isPM || c.isPM60) continue;
     t[c.key] = rows.reduce((a, r) => a + (r[c.key] || 0), 0);
   }
   return t;
 };
+
+/* ---------- Plus/Minus ----------
+   +/- = eigene Tore minus Gegentore, während der Spieler auf dem Feld stand.
+   Basis sind dieselben Feldzeit-Intervalle wie für die Minutenspalte, deshalb
+   passen beide Werte immer zusammen. Ohne erfasste Startaufstellung gibt es
+   keine Feldzeit – dann ist der Wert null und wird als „–" dargestellt.
+   Unter PM_MIN_SEC erfasster Zeit ist die Stichprobe zu klein für eine
+   Aussage; solche Werte werden grau dargestellt (siehe pmColor). */
+const PM_MIN_SEC = 20 * 60;
+/* Vorzeichenbehaftete Anzeige mit deutschem Dezimalkomma: "+3", "−2", "0", "+4,2". */
+const fmtPM = (v, dec = 0) =>
+  v == null ? "–" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(dec).replace(".", ",")}`;
+const pmColor = (v, sec) =>
+  v == null ? undefined
+    : (sec || 0) < PM_MIN_SEC ? C.sub
+    : v > 0 ? C.green : v < 0 ? C.red : C.ink;
+/* Spielerwert aus aggregate(): pm/pm60 sind null ohne erfasste Feldzeit. */
+function playerPlusMinus(agg, id) {
+  const sec = (agg.M || {})[id];
+  if (sec == null || sec <= 0) return { pm: null, pm60: null, pmSec: 0 };
+  const q = (agg.PM || {})[id] || { gf: 0, ga: 0 };
+  const pm = q.gf - q.ga;
+  return { pm, pm60: Math.round((pm / (sec / 3600)) * 10) / 10, pmSec: sec };
+}
+/* Gesamtzeile: die Summe der Spielerwerte wäre rund das Siebenfache und damit
+   sinnlos – stattdessen die echte Tordifferenz des Teams im Filter, normiert
+   auf die tatsächlich erfasste Spielzeit. */
+function teamPlusMinus(agg) {
+  const sec = agg.windowSec || 0;
+  if (!sec) return { pm: null, pm60: null, pmSec: 0 };
+  const pm = (agg.teamGF || 0) - (agg.teamGA || 0);
+  return { pm, pm60: Math.round((pm / (sec / 3600)) * 10) / 10, pmSec: sec };
+}
 /* Karten erscheinen nur im Spieler-Detail (App) bzw. Spieler-Blatt (Excel). */
 const PLAYER_CARD_ROWS = [
   { key: "yellow", label: "Gelbe Karten" },
@@ -705,9 +742,10 @@ function StatusChip({ status }) {
    reason: "sub" | "p2" | "card" | "p2in" – p2/card/p2in sind automatisch
    erzeugt (srcAction verweist auf die Strafen-Aktion). */
 function lineupAndMinutes(game, endSec, startSec = 0) {
-  if (!game.startLineup) return { lineup: null, minutes: null, minutesByPos: null };
+  if (!game.startLineup) return { lineup: null, minutes: null, minutesByPos: null, intervals: null };
   const time = {};
   const byPos = {}; // pid -> { pos: sec } – Spielzeit je Lineup-Position
+  const iv = {};    // pid -> [[von, bis), …] – Feldzeit-Intervalle (Basis für +/-)
   const on = {}; // pos -> { pid, since }
   for (const pos of POSITIONS) {
     const pid = game.startLineup[pos];
@@ -719,11 +757,14 @@ function lineupAndMinutes(game, endSec, startSec = 0) {
   const close = (pos, at) => {
     const c = on[pos];
     if (!c) return;
-    const dur = Math.max(0, at - Math.max(c.since, startSec));
+    const from = Math.max(c.since, startSec);
+    const dur = Math.max(0, at - from);
     if (dur > 0) {
       time[c.pid] = (time[c.pid] || 0) + dur;
       const t = (byPos[c.pid] ||= {});
       t[pos] = (t[pos] || 0) + dur;
+      // Halboffen [from, at) – dieselbe Konvention wie die Minutenberechnung.
+      (iv[c.pid] ||= []).push([from, at]);
     }
     delete on[pos];
   };
@@ -748,7 +789,8 @@ function lineupAndMinutes(game, endSec, startSec = 0) {
   const lineup = {};
   for (const pos of POSITIONS) lineup[pos] = on[pos]?.pid || null;
   for (const pos of POSITIONS) close(pos, endSec);
-  return { lineup, minutes: time, minutesByPos: byPos };
+  for (const list of Object.values(iv)) list.sort((a, b) => a[0] - b[0]);
+  return { lineup, minutes: time, minutesByPos: byPos, intervals: iv };
 }
 function gameEndSec(game) {
   let m = game.timerSec || 0;
@@ -820,7 +862,9 @@ export function situationAt(segs, sec) {
    - endSec: explizites Spielende (z. B. aktueller Timer bei Live-Statistik).
    - situation: "all" (Standard) | "even6" | "even5" | "up" | "down" – zählt nur
      Aktionen aus der jeweiligen Situation; die Spielzeit wird auf die passenden
-     Segmente beschnitten, damit die Minuten-Spalte zum Rest der Zeile passt. */
+     Segmente beschnitten, damit die Minuten-Spalte zum Rest der Zeile passt.
+   Zusätzlich: PM (Plus/Minus je Spieler) sowie teamGF/teamGA/windowSec für die
+   Gesamtzeile – alles nur aus Spielen mit erfasster Startaufstellung. */
 export function aggregate(team, games, opts = {}) {
   const fromSec = opts.fromSec || 0;
   const toSec = opts.toSec == null ? Infinity : opts.toSec;
@@ -836,11 +880,47 @@ export function aggregate(team, games, opts = {}) {
   let oppP2 = 0; // gegnerische 2-min-Strafen (Überzahl-Situationen)
   let situationSec = 0; // Dauer der gewählten Situation im Zeitfenster (Stichprobengröße)
   let situationCount = 0; // Anzahl zusammenhängender Abschnitte dieser Situation
+  const PM = {}; // pid -> { gf, ga } – Tore für/gegen während der Feldzeit
+  let teamGF = 0, teamGA = 0; // Team-Tordifferenz (nur Spiele mit Aufstellung)
+  let windowSec = 0; // erfasste Feldzeit im Filter (Normierung für +/- pro 60)
+  const ensurePM = (id) => (PM[id] ||= { gf: 0, ga: 0 });
   const ensureP = (id) => (P[id] ||= { goals: 0, shots: 0, assist: 0, tf: 0, steal: 0, block: 0, p2: 0, yellow: 0, red: 0, blue: 0, m7won: 0, m7caused: 0 });
   const ensureK = (id) => (K[id] ||= { saves: 0, conceded: 0 });
   for (const g of games) {
     for (const id of g.roster || []) R[id] = (R[id] || 0) + 1;
     const segs = situation === "all" ? null : situationSegments(g);
+    const end = Math.min(opts.endSec != null ? opts.endSec : gameEndSec(g), toSec);
+    /* Zeitfenster ∩ Situation: bei "all" ein Fenster, sonst je passendem Segment
+       eines. `lineupAndMinutes` spielt die Wechsel-Historie bei jedem Aufruf
+       vollständig ab und rekonstruiert die Aufstellung an der unteren
+       Fenstergrenze – mehrere Fenster sind daher unkritisch. */
+    const windows = segs
+      ? segs.filter((s) => s.sit === situation)
+          .map((s) => [Math.max(s.from, fromSec), Math.min(s.to, end)])
+          .filter(([a, b]) => b > a)
+      : [[fromSec, end]];
+    if (segs) {
+      for (const [ws, we] of windows) { situationSec += we - ws; situationCount++; }
+    }
+    /* Feldzeit-Intervalle je Spieler – Grundlage für Minuten UND +/-, damit
+       beide Werte garantiert aus derselben Wechsel-Wiedergabe stammen.
+       Muss vor der Aktionsschleife stehen, weil die Tore dort einsortiert
+       werden. */
+    let ivAll = null;
+    if (g.startLineup) {
+      minutesTracked++;
+      ivAll = {};
+      for (const [ws, we] of windows) {
+        const { minutes, minutesByPos, intervals } = lineupAndMinutes(g, we, ws);
+        for (const [id, s] of Object.entries(minutes || {})) M[id] = (M[id] || 0) + s;
+        for (const [id, per] of Object.entries(minutesByPos || {})) {
+          const t = (MP[id] ||= {});
+          for (const [pos, s] of Object.entries(per)) t[pos] = (t[pos] || 0) + s;
+        }
+        for (const [id, list] of Object.entries(intervals || {})) (ivAll[id] ||= []).push(...list);
+        windowSec += we - ws;
+      }
+    }
     for (const a of g.actions || []) {
       if (!inWin(a.sec)) continue;
       if (a.type === "oppPenalty") {
@@ -850,6 +930,19 @@ export function aggregate(team, games, opts = {}) {
       }
       if (segs && situationAt(segs, a.sec) !== situation) continue;
       if (a.type === "throw") {
+        /* +/-: jedes Tor zählt für alle Spieler, die zu dieser Sekunde auf dem
+           Feld standen. Halboffene Intervalle – ein Tor exakt zur
+           Wechselsekunde zählt für den eingewechselten Spieler. */
+        if (a.result === "goal" && ivAll) {
+          const forUs = a.side === "us";
+          if (forUs) teamGF++; else teamGA++;
+          const at = a.sec || 0;
+          for (const id of Object.keys(ivAll)) {
+            if (!ivAll[id].some(([f, t]) => at >= f && at < t)) continue;
+            const q = ensurePM(id);
+            if (forUs) q.gf++; else q.ga++;
+          }
+        }
         if (a.side === "us") {
           const s = ensureP(a.playerId);
           s.shots++; if (a.result === "goal") s.goals++;
@@ -867,30 +960,6 @@ export function aggregate(team, games, opts = {}) {
         ensureP(a.playerId)[a.type]++;
       }
     }
-    const end = Math.min(opts.endSec != null ? opts.endSec : gameEndSec(g), toSec);
-    /* Zeitfenster ∩ Situation: bei "all" ein Fenster, sonst je passendem Segment
-       eines. `lineupAndMinutes` spielt die Wechsel-Historie bei jedem Aufruf
-       vollständig ab und rekonstruiert die Aufstellung an der unteren
-       Fenstergrenze – mehrere Fenster sind daher unkritisch. */
-    const windows = segs
-      ? segs.filter((s) => s.sit === situation)
-          .map((s) => [Math.max(s.from, fromSec), Math.min(s.to, end)])
-          .filter(([a, b]) => b > a)
-      : [[fromSec, end]];
-    if (segs) {
-      for (const [ws, we] of windows) { situationSec += we - ws; situationCount++; }
-    }
-    if (g.startLineup) {
-      minutesTracked++;
-      for (const [ws, we] of windows) {
-        const { minutes, minutesByPos } = lineupAndMinutes(g, we, ws);
-        for (const [id, s] of Object.entries(minutes || {})) M[id] = (M[id] || 0) + s;
-        for (const [id, per] of Object.entries(minutesByPos || {})) {
-          const t = (MP[id] ||= {});
-          for (const [pos, s] of Object.entries(per)) t[pos] = (t[pos] || 0) + s;
-        }
-      }
-    }
   }
   // Spieler mit Spielzeit, aber ohne Aktionen, trotzdem in die Tabellen aufnehmen
   for (const id of Object.keys(M)) {
@@ -900,6 +969,7 @@ export function aggregate(team, games, opts = {}) {
   return {
     P, K, Z, M, MP, R, minutesTracked, gamesCount: games.length, oppP2,
     situation, situationSec, situationCount,
+    PM, teamGF, teamGA, windowSec,
   };
 }
 
@@ -2541,7 +2611,8 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
   const fs = statsFilterState(games, sel, fromMin, toMin, situation);
   const { source, winOpts } = fs;
   const agg = useMemo(
-    () => (team ? aggregate(team, source, winOpts) : { P: {}, K: {}, M: {}, MP: {}, R: {}, minutesTracked: 0, gamesCount: 0 }),
+    () => (team ? aggregate(team, source, winOpts)
+      : { P: {}, K: {}, M: {}, MP: {}, R: {}, PM: {}, minutesTracked: 0, gamesCount: 0, teamGF: 0, teamGA: 0, windowSec: 0 }),
     [team, games, sel, fromMin, toMin, situation]
   );
   /* Wurfbild folgt demselben Filter wie die Zahlen darüber (zuvor wurde hier die
@@ -2580,6 +2651,7 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
   );
   const quote = s && s.shots ? Math.round((s.goals / s.shots) * 100) + "%" : "–";
   const kQuote = k && (k.saves + k.conceded) ? Math.round((k.saves / (k.saves + k.conceded)) * 100) + "%" : "–";
+  const pp = playerPlusMinus(agg, playerId);
   const hasAny = s || k || totalSec > 0;
 
   return (
@@ -2628,12 +2700,26 @@ function PlayerScreen({ data, go, teamId, playerId, init = {}, back }) {
             )}
             {agg.minutesTracked < agg.gamesCount && (
               <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
-                Spielzeit wird nur aus Spielen mit erfasster Startaufstellung berechnet
+                Spielzeit und „+/-" werden nur aus Spielen mit erfasster Startaufstellung berechnet
                 ({agg.minutesTracked} von {agg.gamesCount} Spielen). Kader-Spiele ohne Startaufstellung
                 zählen im Ø mit 0 Minuten.
               </div>
             )}
           </Card>
+          {pp.pm != null && (
+            <Card>
+              <SectionH>Plus/Minus</SectionH>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {tile("+/-", fmtPM(pp.pm), pmColor(pp.pm, pp.pmSec))}
+                {tile("+/- pro 60 Min", fmtPM(pp.pm60, 1), pmColor(pp.pm60, pp.pmSec))}
+              </div>
+              <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 10 }}>
+                Eigene Tore minus Gegentore während der Feldzeit von {player.name}
+                {" "}({Math.round(pp.pmSec / 60)}&thinsp;Min. im gewählten Zeitraum).
+                {pp.pmSec < PM_MIN_SEC && " Sehr kleine Stichprobe – der Wert ist wenig aussagekräftig."}
+              </div>
+            </Card>
+          )}
           {s && (
             <Card>
               <SectionH>Feldstatistik</SectionH>
@@ -2837,6 +2923,12 @@ const xlNum = (v, s) => ({ v: v == null ? 0 : v, t: "n", ...(s ? { s } : {}) });
 const xlPct = (num, den, s) => (den ? { v: num / den, t: "n", z: "0%", ...(s ? { s } : {}) } : xlText("–", s));
 /* Minuten wie in der App: "–" ohne erfasste Startaufstellung, sonst gerundete Minuten. */
 const xlMin = (sec) => (sec == null || sec < 0 ? xlText("–") : xlNum(Math.round(sec / 60)));
+/* +/- als echte Zahl mit Vorzeichenformat (in Excel weiterrechenbar), "–" ohne Feldzeit. */
+const xlPM = (v, dec = 0, s) =>
+  v == null ? xlText("–", s)
+    : { v, t: "n", z: dec ? "+0.0;-0.0;0.0" : "+0;-0;0", ...(s ? { s } : {}) };
+/* Zelle für eine der beiden +/--Spalten – identische Logik wie in der App-Tabelle. */
+const xlPMCell = (c, src, s) => xlPM(c.isPM ? src.pm : src.pm60, c.isPM60 ? 1 : 0, s);
 
 const sanitizeFileName = (s) => s.replace(/[\\/:*?"<>|]/g, "-").trim();
 const sanitizeSheetName = (s, used) => {
@@ -2905,28 +2997,38 @@ function buildTeamSheet({ team, agg, rows, kRows, zRows, heading }) {
     aoa.push([
       xlText(r.num === 999 ? "–" : `#${r.num}`), xlText(r.name, XL.bold),
       ...FIELD_STAT_COLS.map((c) =>
-        c.percent ? xlPct(r.goals, r.shots) : c.isMin ? xlMin(r.min) : xlNum(r[c.key])
+        c.percent ? xlPct(r.goals, r.shots) : c.isMin ? xlMin(r.min)
+          : c.isPM || c.isPM60 ? xlPMCell(c, r) : xlNum(r[c.key])
       ),
     ]);
   }
   if (rows.length > 0) {
     const t = statTotals(rows, FIELD_STAT_COLS);
+    const tPM = teamPlusMinus(agg);
     aoa.push([
       xlText("–", XL.totalLeft), xlText("Gesamt", XL.totalLeft),
       ...FIELD_STAT_COLS.map((c) =>
         c.percent ? xlPct(t.goals, t.shots, XL.total)
-          : c.isMin ? xlText("–", XL.total) : xlNum(t[c.key], XL.total)
+          : c.isMin ? xlText("–", XL.total)
+          : c.isPM || c.isPM60 ? xlPMCell(c, tPM, XL.total)
+          : xlNum(t[c.key], XL.total)
       ),
     ]);
   }
   if (agg.minutesTracked < agg.gamesCount) {
     aoa.push([xlText(
-      `Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet (${agg.minutesTracked} von ${agg.gamesCount} Spielen).`,
+      `Spielzeit („Min.") und „+/-" werden nur aus Spielen mit erfasster Startaufstellung berechnet (${agg.minutesTracked} von ${agg.gamesCount} Spielen).`,
       XL.note
     )]);
   }
   if (agg.oppP2 > 0) {
     aoa.push([xlText(`Gegner: ${agg.oppP2} × 2-Minuten-Strafe (Überzahl-Situationen) im gewählten Zeitraum.`, XL.note)]);
+  }
+  if (teamPlusMinus(agg).pm != null) {
+    aoa.push([xlText(
+      "„+/-\" = eigene Tore minus Gegentore während der Feldzeit des Spielers. In der Gesamtzeile steht die Tordifferenz des Teams, nicht die Summe der Spielerwerte.",
+      XL.note
+    )]);
   }
   aoa.push([]);
   aoa.push([xlText("Torhüter", XL.section)]);
@@ -2938,17 +3040,21 @@ function buildTeamSheet({ team, agg, rows, kRows, zRows, heading }) {
     aoa.push([
       xlText(r.num === 999 ? "–" : `#${r.num}`), xlText(r.name, XL.bold),
       ...KEEPER_STAT_COLS.map((c) =>
-        c.percent ? xlPct(r.saves, r.saves + r.conceded) : c.isMin ? xlMin(r.min) : xlNum(r[c.key])
+        c.percent ? xlPct(r.saves, r.saves + r.conceded) : c.isMin ? xlMin(r.min)
+          : c.isPM || c.isPM60 ? xlPMCell(c, r) : xlNum(r[c.key])
       ),
     ]);
   }
   if (kRows.length > 0) {
     const t = statTotals(kRows, KEEPER_STAT_COLS);
+    const tPM = teamPlusMinus(agg);
     aoa.push([
       xlText("–", XL.totalLeft), xlText("Gesamt", XL.totalLeft),
       ...KEEPER_STAT_COLS.map((c) =>
         c.percent ? xlPct(t.saves, t.saves + t.conceded, XL.total)
-          : c.isMin ? xlText("–", XL.total) : xlNum(t[c.key], XL.total)
+          : c.isMin ? xlText("–", XL.total)
+          : c.isPM || c.isPM60 ? xlPMCell(c, tPM, XL.total)
+          : xlNum(t[c.key], XL.total)
       ),
     ]);
   }
@@ -2968,6 +3074,7 @@ function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
   const s = agg.P[player.id];
   const k = agg.K[player.id];
   const mp = agg.MP[player.id] || {};
+  const pp = playerPlusMinus(agg, player.id);
   const totalSec = Object.values(mp).reduce((a, b) => a + b, 0);
   const aoa = [];
   aoa.push([xlText(`#${player.number} ${player.name}`, XL.title)]);
@@ -2981,7 +3088,10 @@ function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
     aoa.push([xlText("Kennzahl", XL.thLeft), xlText("Wert", XL.th)]);
     for (const c of FIELD_STAT_COLS) {
       if (c.isMin) continue; // Gesamtspielzeit bewusst nur in der Team-Tabelle (Trennungsregel)
-      aoa.push([xlText(c.label), c.percent ? xlPct(s.goals, s.shots) : xlNum(s[c.key])]);
+      aoa.push([xlText(c.label),
+        c.percent ? xlPct(s.goals, s.shots)
+          : c.isPM || c.isPM60 ? xlPMCell(c, pp)
+          : xlNum(s[c.key])]);
     }
     for (const c of PLAYER_CARD_ROWS) aoa.push([xlText(c.label), xlNum(s[c.key])]);
     aoa.push([]);
@@ -2991,7 +3101,10 @@ function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
     aoa.push([xlText("Kennzahl", XL.thLeft), xlText("Wert", XL.th)]);
     for (const c of KEEPER_STAT_COLS) {
       if (c.isMin) continue;
-      aoa.push([xlText(c.label), c.percent ? xlPct(k.saves, k.saves + k.conceded) : xlNum(k[c.key])]);
+      aoa.push([xlText(c.label),
+        c.percent ? xlPct(k.saves, k.saves + k.conceded)
+          : c.isPM || c.isPM60 ? xlPMCell(c, pp)
+          : xlNum(k[c.key])]);
     }
     aoa.push([]);
   }
@@ -3025,7 +3138,7 @@ function buildPlayerSheet({ player, agg, heat, heading, seasonScope }) {
     }
     if (agg.minutesTracked < agg.gamesCount) {
       aoa.push([xlText(
-        `Spielzeit nur aus Spielen mit erfasster Startaufstellung (${agg.minutesTracked} von ${agg.gamesCount} Spielen); Kader-Spiele ohne Startaufstellung zählen im Ø mit 0 Minuten.`,
+        `Spielzeit und „+/-" nur aus Spielen mit erfasster Startaufstellung (${agg.minutesTracked} von ${agg.gamesCount} Spielen); Kader-Spiele ohne Startaufstellung zählen im Ø mit 0 Minuten.`,
         XL.note
       )]);
     }
@@ -3118,6 +3231,8 @@ function SortTh({ label, k, sort, setSort, defaultDir = -1, left }) {
 /* Vergleich nach Sortier-Schlüssel, bei Gleichstand Standardreihenfolge (tie). */
 const mkCmp = (sort, tie) => (a, b) => {
   const va = a[sort.key], vb = b[sort.key];
+  // Zeilen ohne Wert (z. B. „–" bei +/- ohne erfasste Aufstellung) immer unten.
+  if ((va == null) !== (vb == null)) return va == null ? 1 : -1;
   const d = typeof va === "string" || typeof vb === "string"
     ? String(va ?? "").localeCompare(String(vb ?? ""), "de")
     : (va ?? 0) - (vb ?? 0);
@@ -3136,11 +3251,13 @@ export function buildStatRows(team, agg) {
     id, ...s, ...meta(id),
     quote: s.shots ? Math.round((s.goals / s.shots) * 100) : 0,
     min: M[id] == null ? -1 : M[id],
+    ...playerPlusMinus(agg, id),
   }));
   const kRows = Object.entries(K).map(([id, s]) => ({
     id, ...s, ...meta(id),
     quote: s.saves + s.conceded ? Math.round((s.saves / (s.saves + s.conceded)) * 100) : 0,
     min: M[id] == null ? -1 : M[id],
+    ...playerPlusMinus(agg, id),
   }));
   const zRows = Object.keys(ZONE_LABEL).map((z) => ({ z, ...(Z[z] || { shots: 0, goals: 0 }) })).filter((r) => r.shots > 0);
   return { rows, kRows, zRows };
@@ -3169,13 +3286,27 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
   const tdTotalNum = { ...tdTotal, color: C.sub, textAlign: "left", width: 40 };
   const fTot = statTotals(rows, FIELD_STAT_COLS);
   const kTot = statTotals(kRows, KEEPER_STAT_COLS);
+  const tPM = teamPlusMinus(agg);
+  const lowPM = [...rows, ...kRows].some((r) => r.pm != null && r.pmSec < PM_MIN_SEC);
+  /* Zellinhalt/-farbe für die beiden +/--Spalten (Feld- und Torhütertabelle). */
+  const pmCell = (c, r, base) => {
+    const v = c.isPM ? r.pm : r.pm60;
+    return { content: fmtPM(v, c.isPM60 ? 1 : 0), style: { ...base, color: pmColor(v, r.pmSec) } };
+  };
   const fTotQuote = fTot.shots ? Math.round((fTot.goals / fTot.shots) * 100) + "%" : "–";
   const kTotQuote = (kTot.saves + kTot.conceded)
     ? Math.round((kTot.saves / (kTot.saves + kTot.conceded)) * 100) + "%" : "–";
   const minNote = minutesTracked < gamesCount && (
     <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
-      Spielzeit („Min.") wird nur aus Spielen mit erfasster Startaufstellung berechnet
-      ({minutesTracked} von {gamesCount} Spielen).
+      Spielzeit („Min.") und „+/-" werden nur aus Spielen mit erfasster Startaufstellung
+      berechnet ({minutesTracked} von {gamesCount} Spielen).
+    </div>
+  );
+  const pmNote = tPM.pm != null && (
+    <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
+      „+/-" = eigene Tore minus Gegentore während der Feldzeit des Spielers.
+      In der Gesamtzeile steht die Tordifferenz des Teams, nicht die Summe der Spielerwerte.
+      {lowPM && " Graue Werte beruhen auf weniger als 20 erfassten Minuten und sind wenig aussagekräftig."}
     </div>
   );
   const sitNote = situation !== "all" && (
@@ -3201,6 +3332,10 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
                 <td style={tdNum}>#{r.num === 999 ? "–" : r.num}</td>
                 <td style={{ ...tdName, color: onPlayer ? C.blueDark : C.ink }}>{r.name}</td>
                 {FIELD_STAT_COLS.map((c) => {
+                  if (c.isPM || c.isPM60) {
+                    const cell = pmCell(c, r, td);
+                    return <td key={c.key} style={cell.style}>{cell.content}</td>;
+                  }
                   const content = c.percent ? (r.shots ? r.quote + "%" : "–")
                     : c.isMin ? fmtMin(r.id) : r[c.key];
                   const style = c.key === "goals" ? { ...td, fontWeight: 800, color: C.green }
@@ -3214,7 +3349,8 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
               <td style={tdTotalName}>Gesamt</td>
               {FIELD_STAT_COLS.map((c) => (
                 <td key={c.key} style={tdTotal}>
-                  {c.percent ? fTotQuote : c.isMin ? "–" : fTot[c.key]}
+                  {c.percent ? fTotQuote : c.isMin ? "–"
+                    : c.isPM ? fmtPM(tPM.pm) : c.isPM60 ? fmtPM(tPM.pm60, 1) : fTot[c.key]}
                 </td>
               ))}
             </tr>
@@ -3227,6 +3363,7 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
           </div>
         )}
         {minNote}
+        {pmNote}
         {sitNote}
         {oppP2 > 0 && (
           <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginTop: 8 }}>
@@ -3250,6 +3387,10 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
                 <td style={tdNum}>#{r.num === 999 ? "–" : r.num}</td>
                 <td style={{ ...tdName, color: onPlayer ? C.blueDark : C.ink }}>{r.name}</td>
                 {KEEPER_STAT_COLS.map((c) => {
+                  if (c.isPM || c.isPM60) {
+                    const cell = pmCell(c, r, td);
+                    return <td key={c.key} style={cell.style}>{cell.content}</td>;
+                  }
                   const content = c.percent ? r.quote + "%" : c.isMin ? fmtMin(r.id) : r[c.key];
                   const style = c.key === "saves" ? { ...td, fontWeight: 800, color: C.green } : td;
                   return <td key={c.key} style={style}>{content}</td>;
@@ -3261,7 +3402,8 @@ export function StatsTables({ team, agg, onPlayer, exportCtx }) {
               <td style={tdTotalName}>Gesamt</td>
               {KEEPER_STAT_COLS.map((c) => (
                 <td key={c.key} style={tdTotal}>
-                  {c.percent ? kTotQuote : c.isMin ? "–" : kTot[c.key]}
+                  {c.percent ? kTotQuote : c.isMin ? "–"
+                    : c.isPM ? fmtPM(tPM.pm) : c.isPM60 ? fmtPM(tPM.pm60, 1) : kTot[c.key]}
                 </td>
               ))}
             </tr>
