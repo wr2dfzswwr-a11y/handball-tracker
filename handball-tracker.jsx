@@ -56,13 +56,14 @@ const ZONE_LABEL = {
   RUECK_L: "Rückraum links", RUECK_M: "Rückraum Mitte", RUECK_R: "Rückraum rechts",
   SIEBEN_M: "7 Meter", KONTER: "Konter", FREIWURF: "Freiwurf",
 };
+const THROW_SITUATION_LABEL = { normal: "", konter: "Konter", freiwurf: "Freiwurf", "7m": "7 Meter" };
 const TARGET_LABEL = {
   t1: "oben links", t2: "oben Mitte", t3: "oben rechts",
   t4: "halbhoch links", t5: "Mitte", t6: "halbhoch rechts",
   t7: "unten links", t8: "unten Mitte", t9: "unten rechts",
   POST: "Pfosten/Latte", WIDE: "daneben",
 };
-const RESULT_LABEL = { goal: "Tor", saved: "Gehalten", post: "Pfosten", wide: "Vorbei" };
+const RESULT_LABEL = { goal: "Tor", saved: "Gehalten", post: "Pfosten", wide: "Vorbei", blocked: "Geblockt" };
 const PENALTY_LABEL = { p2: "2 Minuten", yellow: "Gelbe Karte", red: "Rote Karte", blue: "Blaue Karte" };
 const SIMPLE_LABEL = {
   assist: "Assist", steal: "Steal", block: "Block", tf: "Technischer Fehler",
@@ -299,19 +300,64 @@ const ZONE_LABEL_POS = {
   RUECK_L: [62, 238], RUECK_M: [200, 238], RUECK_R: [338, 238],
 };
 
-/* ---------- Spielfeld-SVG (Abwurfzone wählen) ---------- */
+/* Koordinaten bleiben unabhängig von der Displaygröße zwischen 0 und 1. */
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+function svgPosition(e) {
+  const svg = e.currentTarget;
+  const p = svg.createSVGPoint();
+  p.x = e.clientX; p.y = e.clientY;
+  return p.matrixTransform(svg.getScreenCTM().inverse());
+}
+export function zoneAt(x, y) {
+  if (y < yOn(120, x)) return "KREIS";
+  if (y < yOn(180, x)) {
+    if (x < 80) return "AUSSEN_L";
+    if (x > 320) return "AUSSEN_R";
+    return x < 160 ? "DURCH_L" : x > 240 ? "DURCH_R" : "DURCH_M";
+  }
+  return x < 133 ? "RUECK_L" : x > 267 ? "RUECK_R" : "RUECK_M";
+}
+export const goalTargetAt = (x, y) => {
+  if ((x >= 32 && x <= 348 && y >= 32 && y <= 46) ||
+      (x >= 32 && x <= 46 && y >= 32 && y <= 238) ||
+      (x >= 334 && x <= 348 && y >= 32 && y <= 238)) return "POST";
+  if (x < 46 || x > 334 || y < 46 || y > 238) return "WIDE";
+  return `t${Math.min(2, Math.floor((y - 46) / 64)) * 3 + Math.min(2, Math.floor((x - 46) / 96)) + 1}`;
+};
+export const automaticShotResult = (target) => target === "WIDE" ? "wide" : target === "POST" ? "post" : null;
+export const availableThrowResults = (a) => {
+  if (a.result === "blocked" && hasShotOrigin(a) && !hasGoalPoint(a)) return ["blocked"];
+  if (!hasShotPoint(a)) return ["goal", "saved", "post", "wide"];
+  const automatic = automaticShotResult(a.target);
+  return automatic ? [automatic] : ["goal", "saved"];
+};
+
+/* ---------- Spielfeld-SVG (Abwurfpunkt setzen) ---------- */
 function CourtPicker({ onPick }) {
-  const [hover, setHover] = useState(null);
+  const [kind, setKind] = useState(null);
+  const situationFor = (value) => value === "KONTER" ? "konter" : value === "FREIWURF" ? "freiwurf" : "normal";
+  const chooseSpecial = (value) => {
+    if (value === "SIEBEN_M") {
+      onPick({ zone: "SIEBEN_M", situation: "7m", shotX: 0.5, shotY: clamp01(140 / 292) });
+      return;
+    }
+    setKind((cur) => cur === value ? null : value);
+  };
   return (
     <div>
-      <svg viewBox="-4 -8 408 306" style={{ width: "100%", display: "block", touchAction: "manipulation" }}>
-        {Object.keys(ZONE_PATHS).map((z) => (
-          <path key={z} d={ZONE_PATHS[z]}
-            fill={hover === z ? C.courtHover : C.court}
-            stroke="#fff" strokeWidth="2" style={{ cursor: "pointer" }}
-            onMouseEnter={() => setHover(z)} onMouseLeave={() => setHover(null)}
-            onClick={() => onPick(z)} />
-        ))}
+      <div style={{ fontFamily: SANS, fontSize: 14, color: C.sub, marginBottom: 8 }}>
+        {kind ? `${ZONE_LABEL[kind]} aktiviert · genauen Abwurfpunkt auf dem Feld antippen.` : "Abwurfpunkt auf dem Feld antippen."}
+      </div>
+      <svg viewBox="-4 -8 408 306" onClick={(e) => {
+        const p = svgPosition(e);
+        if (p.x < 0 || p.x > 400 || p.y < 0 || p.y > 292) return;
+        onPick({
+          zone: zoneAt(p.x, p.y),
+          situation: situationFor(kind),
+          shotX: clamp01(p.x / 400), shotY: clamp01(p.y / 292),
+        });
+      }} style={{ width: "100%", display: "block", touchAction: "manipulation", cursor: "crosshair" }}>
+        <rect x="0" y="0" width="400" height="292" fill={C.court} />
         {/* 6m-Linie */}
         <path d={path(seg(120, 50, 350), false)} fill="none" stroke={C.blue} strokeWidth="3" pointerEvents="none" />
         {/* 9m-Linie gestrichelt */}
@@ -323,18 +369,12 @@ function CourtPicker({ onPick }) {
         {/* Torlinie + Tor */}
         <line x1="0" y1="0" x2="400" y2="0" stroke={C.sub} strokeWidth="2" pointerEvents="none" />
         <line x1="170" y1="-3" x2="230" y2="-3" stroke={C.red} strokeWidth="7" pointerEvents="none" />
-        {Object.entries(ZONE_LABEL_POS).map(([z, [x, y]]) => (
-          <text key={z} x={x} y={y} textAnchor="middle" pointerEvents="none"
-            style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, fill: hover === z ? C.blueDark : C.sub }}>
-            {ZONE_SHORT[z]}
-          </text>
-        ))}
       </svg>
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
         {["SIEBEN_M", "KONTER", "FREIWURF"].map((z) => (
-          <button key={z} onClick={() => onPick(z)} style={{
+          <button key={z} onClick={() => chooseSpecial(z)} style={{
             flex: 1, padding: "14px 8px", borderRadius: 12, border: `2px solid ${C.blue}`,
-            background: C.blueSoft, color: C.blueDark, fontFamily: SANS, fontSize: 15,
+            background: kind === z ? C.blue : C.blueSoft, color: kind === z ? "#fff" : C.blueDark, fontFamily: SANS, fontSize: 15,
             fontWeight: 700, cursor: "pointer",
           }}>{ZONE_LABEL[z]}</button>
         ))}
@@ -343,16 +383,15 @@ function CourtPicker({ onPick }) {
   );
 }
 
-/* ---------- Tor-SVG (Zielzone wählen) ---------- */
+/* ---------- Tor-SVG (Zielpunkt setzen, auch neben dem Tor) ---------- */
 function GoalPicker({ onPick }) {
-  const [hover, setHover] = useState(null);
-  const cells = [];
-  for (let r = 0; r < 3; r++)
-    for (let c = 0; c < 3; c++)
-      cells.push({ id: `t${r * 3 + c + 1}`, x: 46 + c * 96, y: 46 + r * 64 });
-  const cellFill = (id) => (hover === id ? C.courtHover : "rgba(234,240,247,0.65)");
   return (
-    <svg viewBox="0 0 380 268" style={{ width: "100%", display: "block", touchAction: "manipulation" }}>
+    <div>
+    <div style={{ fontFamily: SANS, fontSize: 14, color: C.sub, marginBottom: 8 }}>Zielpunkt antippen. Neben dem Tor wird „Vorbei“, auf Pfosten/Latte „Pfosten/Latte“ direkt erfasst.</div>
+    <svg viewBox="0 0 380 268" onClick={(e) => {
+      const p = svgPosition(e);
+      onPick({ target: goalTargetAt(p.x, p.y), goalX: clamp01(p.x / 380), goalY: clamp01(p.y / 268) });
+    }} style={{ width: "100%", display: "block", touchAction: "manipulation", cursor: "crosshair" }}>
       <defs>
         <pattern id="rwH" width="24" height="14" patternUnits="userSpaceOnUse">
           <rect width="24" height="14" fill="#fff" />
@@ -367,31 +406,21 @@ function GoalPicker({ onPick }) {
         </pattern>
       </defs>
       {/* daneben (außerhalb) */}
-      <rect x="0" y="0" width="380" height="268" rx="14"
-        fill={hover === "WIDE" ? "#E7DDD2" : "#F2ECE4"} style={{ cursor: "pointer" }}
-        onMouseEnter={() => setHover("WIDE")} onMouseLeave={() => setHover(null)}
-        onClick={() => onPick("WIDE")} />
+      <rect x="0" y="0" width="380" height="268" rx="14" fill="#F2ECE4" />
       <text x="190" y="24" textAnchor="middle" pointerEvents="none"
         style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, fill: "#8A7B66" }}>daneben</text>
-      {/* Netz + Rasterzellen */}
+      {/* Netz */}
       <rect x="46" y="46" width="288" height="192" fill="url(#net)" pointerEvents="none" />
-      {cells.map((cl) => (
-        <rect key={cl.id} x={cl.x} y={cl.y} width="96" height="64"
-          fill={cellFill(cl.id)} stroke="#fff" strokeWidth="2" style={{ cursor: "pointer" }}
-          onMouseEnter={() => setHover(cl.id)} onMouseLeave={() => setHover(null)}
-          onClick={() => onPick(cl.id)} />
-      ))}
       {/* Pfosten/Latte (rot-weiß) */}
-      <g style={{ cursor: "pointer" }}
-        onMouseEnter={() => setHover("POST")} onMouseLeave={() => setHover(null)}
-        onClick={() => onPick("POST")}>
-        <rect x="32" y="32" width="316" height="14" fill="url(#rwH)" stroke={hover === "POST" ? C.ink : C.sub} strokeWidth={hover === "POST" ? 2.5 : 1} />
-        <rect x="32" y="46" width="14" height="192" fill="url(#rwV)" stroke={hover === "POST" ? C.ink : C.sub} strokeWidth={hover === "POST" ? 2.5 : 1} />
-        <rect x="334" y="46" width="14" height="192" fill="url(#rwV)" stroke={hover === "POST" ? C.ink : C.sub} strokeWidth={hover === "POST" ? 2.5 : 1} />
+      <g pointerEvents="none">
+        <rect x="32" y="32" width="316" height="14" fill="url(#rwH)" stroke={C.sub} strokeWidth="1" />
+        <rect x="32" y="46" width="14" height="192" fill="url(#rwV)" stroke={C.sub} strokeWidth="1" />
+        <rect x="334" y="46" width="14" height="192" fill="url(#rwV)" stroke={C.sub} strokeWidth="1" />
       </g>
       {/* Boden */}
       <line x1="20" y1="238" x2="360" y2="238" stroke={C.sub} strokeWidth="2.5" pointerEvents="none" />
     </svg>
+    </div>
   );
 }
 
@@ -981,13 +1010,16 @@ export function aggregate(team, games, opts = {}) {
 function actionText(team, a) {
   const m = `${actMinute(a)}'`;
   if (a.type === "throw") {
-    const zone = ZONE_LABEL[a.zone] || "";
+    const zoneName = ZONE_LABEL[a.zone] || "";
+    const situationName = THROW_SITUATION_LABEL[a.situation] || "";
+    const zone = [situationName && situationName !== zoneName ? situationName : "", zoneName].filter(Boolean).join(" · ");
     if (a.side === "us") {
       const who = playerName(team, a.playerId);
       const ass = a.assistId ? `, Assist: ${playerName(team, a.assistId)}` : "";
       if (a.result === "goal") return `${m} Tor – ${who} (${zone}${ass})`;
       if (a.result === "saved") return `${m} Wurf gehalten – ${who} (${zone})`;
       if (a.result === "post") return `${m} Pfosten – ${who} (${zone})`;
+      if (a.result === "blocked") return `${m} Wurf geblockt – ${who} (${zone})`;
       return `${m} Wurf vorbei – ${who} (${zone})`;
     }
     const kp = a.keeperId ? playerName(team, a.keeperId) : "Torhüter";
@@ -1480,7 +1512,7 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
   const game = data.games.find((g) => g.id === gameId);
   const [sec, setSec] = useState(game?.timerSec || 0);
   const [running, setRunning] = useState(false);
-  const [pending, setPending] = useState(null); // {side, playerId?, assistId?, pickShooter?, zone?, target?}
+  const [pending, setPending] = useState(null); // Wurf: Abwurf- und Zielpunkt, dann Ergebnis
   const [subModal, setSubModal] = useState(null); // {selPos?}
   const [showStats, setShowStats] = useState(false); // Live-Statistik-Overlay
   const [showTimeControls, setShowTimeControls] = useState(false);
@@ -1602,11 +1634,12 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
   };
 
   /* Wurf-Flow abschließen */
-  const finishThrow = (result) => {
-    const p = pending;
+  const finishThrow = (result, point = {}) => {
+    const p = { ...pending, ...point };
     addAction({
       type: "throw", side: p.side, playerId: p.playerId || null,
-      zone: p.zone, target: p.target, result,
+      zone: p.zone, situation: p.situation || "normal", target: p.target, shotX: p.shotX, shotY: p.shotY,
+      goalX: p.goalX, goalY: p.goalY, result,
       assistId: p.assistId || null,
       keeperId: p.side === "them" ? keeperNow : null,
     });
@@ -2001,30 +2034,26 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
       )}
       {pending && ((pending.isThrow && !pending.zone) || (pending.side === "them" && !pending.zone)) && (
         <Modal wide title={pending.side === "us"
-          ? `Abwurfzone – ${playerName(team, pending.playerId)}${pending.assistId ? ` (Assist: ${playerName(team, pending.assistId)})` : ""}`
-          : "Abwurfzone – Gegner"} onClose={() => setPending(null)}>
-          <CourtPicker onPick={(zone) => setPending((p) => ({ ...p, zone }))} />
+          ? `Abwurfpunkt – ${playerName(team, pending.playerId)}${pending.assistId ? ` (Assist: ${playerName(team, pending.assistId)})` : ""}`
+          : "Abwurfpunkt – Gegner"} onClose={() => setPending(null)}>
+          <CourtPicker onPick={(point) => setPending((p) => ({ ...p, ...point }))} />
         </Modal>
       )}
       {pending && pending.zone && !pending.target && (
-        <Modal wide title={`Zielzone (${ZONE_LABEL[pending.zone]})`} onClose={() => setPending(null)}>
-          <GoalPicker onPick={(target) => {
-            if (target === "POST" || target === "WIDE") {
-              const result = target === "POST" ? "post" : "wide";
-              addAction({
-                type: "throw", side: pending.side, playerId: pending.playerId || null,
-                zone: pending.zone, target, result,
-                assistId: pending.assistId || null,
-                keeperId: pending.side === "them" ? keeperNow : null,
-              });
-              setPending(null);
-            } else setPending((p) => ({ ...p, target }));
+        <Modal wide title="Zielpunkt" onClose={() => setPending(null)}>
+          <GoalPicker onPick={(point) => {
+            const automatic = automaticShotResult(point.target);
+            if (automatic) finishThrow(automatic, point);
+            else setPending((p) => ({ ...p, ...point }));
           }} />
+          {pending.side === "us" && <Btn kind="soft" style={{ width: "100%", marginTop: 10 }}
+            onClick={() => finishThrow("blocked", { target: null, goalX: null, goalY: null })}>Vom Gegner geblockt</Btn>}
+          <Btn kind="ghost" onClick={() => setPending((p) => ({ ...p, zone: null, shotX: null, shotY: null }))}>← Abwurfpunkt ändern</Btn>
         </Modal>
       )}
-      {pending && pending.target && (
+      {pending && pending.target && !automaticShotResult(pending.target) && (
         <Modal title={`${TARGET_LABEL[pending.target]} – Ergebnis?`} onClose={() => setPending(null)}>
-          <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
             <Btn kind={pending.side === "us" ? "green" : "danger"} style={{ flex: 1, padding: "22px", fontSize: 18 }}
               onClick={() => finishThrow("goal")}>
               {pending.side === "us" ? "⚽ Tor" : "Gegentor"}
@@ -2034,6 +2063,7 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
               {pending.side === "us" ? "🧤 Gehalten" : "🧤 Parade"}
             </Btn>
           </div>
+          <Btn kind="ghost" onClick={() => setPending((p) => ({ ...p, target: null, goalX: null, goalY: null }))} style={{ marginTop: 10 }}>← Zielpunkt ändern</Btn>
         </Modal>
       )}
 
@@ -2079,6 +2109,7 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
   const team = data.teams.find((t) => t.id === teamId);
   const game = data.games.find((g) => g.id === gameId);
   const [editId, setEditId] = useState(null);
+  const [editPoint, setEditPoint] = useState(null);
   const [verlaufOpen, setVerlaufOpen] = useState(true); // Spielverlauf ein-/ausklappen (reiner UI-Zustand)
   if (!team || !game) return <Empty>Spiel nicht gefunden.</Empty>;
   const sc = computeScore(game);
@@ -2101,6 +2132,17 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
   });
 
   const mut = (fn) => update((d) => { const g = d.games.find((x) => x.id === gameId); fn(g); });
+  const saveEditedPoints = (result, goalPoint = {}) => {
+    const point = { ...editPoint, ...goalPoint };
+    mut((g) => {
+      const a = g.actions.find((x) => x.id === point.id);
+      if (a) Object.assign(a, {
+        zone: point.zone, shotX: point.shotX, shotY: point.shotY,
+        target: point.target, goalX: point.goalX, goalY: point.goalY, result,
+      });
+    });
+    setEditPoint(null);
+  };
   const gStats = aggregate(team, [game]);
 
   return (
@@ -2170,14 +2212,20 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
                 )}
                 {a.type === "throw" && (
                   <>
-                    <select style={{ ...inputStyle, width: "auto" }} value={a.result}
+                    <select style={{ ...inputStyle, width: "auto" }}
+                      value={availableThrowResults(a).includes(a.result) ? a.result : ""}
                       onChange={(e) => mut((g) => { g.actions.find((x) => x.id === a.id).result = e.target.value; })}>
-                      {Object.entries(RESULT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      {!availableThrowResults(a).includes(a.result) && <option value="" disabled>Ergebnis korrigieren</option>}
+                      {availableThrowResults(a).map((k) => <option key={k} value={k}>{RESULT_LABEL[k]}</option>)}
                     </select>
-                    <select style={{ ...inputStyle, width: "auto" }} value={a.zone}
-                      onChange={(e) => mut((g) => { g.actions.find((x) => x.id === a.id).zone = e.target.value; })}>
-                      {Object.entries(ZONE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-                    </select>
+                    {hasShotOrigin(a) ? (
+                      <Btn small kind="soft" onClick={() => setEditPoint({ id: a.id, stage: "court" })}>Abwurf- und Zielpunkt ändern</Btn>
+                    ) : (
+                      <select style={{ ...inputStyle, width: "auto" }} value={a.zone}
+                        onChange={(e) => mut((g) => { g.actions.find((x) => x.id === a.id).zone = e.target.value; })}>
+                        {Object.entries(ZONE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                      </select>
+                    )}
                     {a.side === "us" && (
                       <select style={{ ...inputStyle, width: "auto" }} value={a.assistId || ""}
                         onChange={(e) => mut((g) => { g.actions.find((x) => x.id === a.id).assistId = e.target.value || null; })}>
@@ -2233,6 +2281,28 @@ function ReviewScreen({ data, update, go, teamId, gameId }) {
           init: { sel: gameId },
           back: { name: "review", teamId, gameId },
         })} />
+      {editPoint && <Modal wide title={editPoint.stage === "court" ? "Abwurfpunkt ändern" :
+        editPoint.stage === "goal" ? "Zielpunkt ändern" : "Ergebnis zum neuen Zielpunkt"}
+        onClose={() => setEditPoint(null)}>
+        {editPoint.stage === "court" ? <CourtPicker onPick={(point) => setEditPoint((p) => ({ ...p, ...point, stage: "goal" }))} />
+          : editPoint.stage === "goal" ? <>
+            <GoalPicker onPick={(point) => {
+              const automatic = automaticShotResult(point.target);
+              const current = game.actions.find((a) => a.id === editPoint.id);
+              if (automatic) saveEditedPoints(automatic, point);
+              else if (["goal", "saved"].includes(current?.result)) saveEditedPoints(current.result, point);
+              else setEditPoint((p) => ({ ...p, ...point, stage: "result" }));
+            }} />
+            {game.actions.find((a) => a.id === editPoint.id)?.side === "us" &&
+              <Btn kind="soft" style={{ width: "100%", marginTop: 10 }}
+                onClick={() => saveEditedPoints("blocked", { target: null, goalX: null, goalY: null })}>Vom Gegner geblockt</Btn>}
+          </> : <div style={{ display: "flex", gap: 10 }}>
+            <Btn kind="green" style={{ flex: 1, padding: "18px" }} onClick={() => saveEditedPoints("goal")}>Tor</Btn>
+            <Btn kind="soft" style={{ flex: 1, padding: "18px" }} onClick={() => saveEditedPoints("saved")}>
+              {game.actions.find((a) => a.id === editPoint.id)?.side === "them" ? "Parade" : "Gehalten"}
+            </Btn>
+          </div>}
+      </Modal>}
     </div>
   );
 }
@@ -2448,6 +2518,166 @@ export function computeHeat(games, selId, isKeeper) {
   return { zones, targets, zoneTargets, total: { n, k } };
 }
 
+/* Punktbasierte Auswertung; ältere Würfe ohne Koordinaten bleiben in der Zonenansicht. */
+export const hasShotOrigin = (a) => Number.isFinite(a.shotX) && Number.isFinite(a.shotY);
+export const hasGoalPoint = (a) => Number.isFinite(a.goalX) && Number.isFinite(a.goalY);
+export const hasShotPoint = (a) => hasShotOrigin(a) && hasGoalPoint(a);
+function throwMatches(a, selId, isKeeper) {
+  if (a.type !== "throw") return false;
+  return isKeeper
+    ? a.side === "them" && a.keeperId === selId && (a.result === "goal" || a.result === "saved")
+    : a.side === "us" && (selId === "team" || a.playerId === selId);
+}
+export function pointShots(games, selId, isKeeper) {
+  return games.flatMap((g) => (g.actions || []).filter((a) => throwMatches(a, selId, isKeeper) && hasShotOrigin(a)));
+}
+export function oldShotGames(games) {
+  return games.map((g) => ({ ...g, actions: (g.actions || []).filter((a) => a.type === "throw" && !hasShotOrigin(a)) }));
+}
+const THROW_SITUATION_OPTIONS = [
+  ["all", "Alle"], ["normal", "Normal"], ["konter", "Konter"], ["freiwurf", "Freiwurf"], ["7m", "7 Meter"],
+];
+export const throwSituationOf = (a) => {
+  if (["normal", "konter", "freiwurf", "7m"].includes(a.situation)) return a.situation;
+  if (a.zone === "KONTER") return "konter";
+  if (a.zone === "FREIWURF") return "freiwurf";
+  if (a.zone === "SIEBEN_M") return "7m";
+  return "normal";
+};
+export function filterThrowGames(games, filter) {
+  if (!filter || filter === "all") return games;
+  return games.map((g) => ({
+    ...g,
+    actions: (g.actions || []).filter((a) => a.type !== "throw" || throwSituationOf(a) === filter),
+  }));
+}
+function ThrowSituationToggle({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontFamily: SANS, fontSize: 13, color: C.sub, fontWeight: 700 }}>Situation:</span>
+      {THROW_SITUATION_OPTIONS.map(([key, label]) => (
+        <button key={key} onClick={() => onChange(key)} style={{
+          ...btnBase, padding: "6px 10px", fontSize: 12,
+          background: value === key ? C.navy : "#fff", color: value === key ? "#fff" : C.sub,
+          border: `2px solid ${value === key ? C.navy : C.line}`,
+        }}>{label}</button>
+      ))}
+    </div>
+  );
+}
+function PointHeatMap({ shots, place, metric, isKeeper, selected, onSelect }) {
+  const court = place === "court";
+  const w = court ? 400 : 380, h = court ? 292 : 268;
+  const keyX = court ? "shotX" : "goalX", keyY = court ? "shotY" : "goalY";
+  const cols = court ? 25 : 24, rows = court ? 18 : 17;
+  const cells = [];
+  let highest = 0;
+  for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+    const x = (col + 0.5) / cols, y = (row + 0.5) / rows;
+    let weight = 0, success = 0;
+    for (const a of shots) {
+      const dx = (x - a[keyX]) * w, dy = (y - a[keyY]) * h;
+      const kernel = Math.exp(-(dx * dx + dy * dy) / (2 * (court ? 30 : 24) ** 2));
+      weight += kernel;
+      if (a.result === (isKeeper ? "saved" : "goal")) success += kernel;
+    }
+    highest = Math.max(highest, weight);
+    cells.push({ col, row, weight, success });
+  }
+  const visual = (c) => {
+    if (c.weight < 0.09) return "transparent";
+    if (metric === "density") {
+      const alpha = 0.14 + 0.62 * Math.sqrt(c.weight / (highest || 1));
+      return `rgba(232, 98, 44, ${alpha.toFixed(2)})`;
+    }
+    const ratio = c.success / c.weight;
+    const alpha = Math.min(0.75, 0.18 + c.weight * 0.3);
+    return `hsla(${Math.round(ratio * 125)}, 64%, 44%, ${alpha.toFixed(2)})`;
+  };
+  return (
+    <svg viewBox={court ? "0 -8 400 300" : "0 0 380 268"}
+      onClick={(e) => {
+        if (!onSelect) return;
+        const p = svgPosition(e);
+        if (p.x >= 0 && p.x <= w && p.y >= 0 && p.y <= h) onSelect({ x: p.x / w, y: p.y / h });
+      }} style={{ width: "100%", display: "block", cursor: court ? "crosshair" : "default", touchAction: "manipulation" }}>
+      <rect x="0" y="0" width={w} height={h} fill={court ? C.court : "#F2ECE4"} />
+      {cells.map((c) => <rect key={`${c.col}-${c.row}`} x={c.col * w / cols} y={c.row * h / rows}
+        width={w / cols + 0.3} height={h / rows + 0.3} fill={visual(c)} pointerEvents="none" />)}
+      {court ? (
+        <g fill="none" pointerEvents="none">
+          <path d={path(seg(120, 50, 350), false)} stroke={C.blue} strokeWidth="2.5" />
+          <path d={path(seg(180, 0, 400), false)} stroke={C.blue} strokeWidth="2" strokeDasharray="10 8" />
+          <line x1="188" x2="212" y1="140" y2="140" stroke={C.ink} strokeWidth="2" />
+          <line x1="0" x2="400" y1="0" y2="0" stroke={C.sub} strokeWidth="2" />
+          <line x1="170" x2="230" y1="-3" y2="-3" stroke={C.red} strokeWidth="7" />
+        </g>
+      ) : (
+        <g fill="none" pointerEvents="none" stroke={C.red} strokeWidth="12">
+          <path d="M40 238 V40 H340 V238" />
+          <path d="M20 239 H360" stroke={C.sub} strokeWidth="2" />
+        </g>
+      )}
+      {shots.map((a) => <circle key={a.id} cx={a[keyX] * w} cy={a[keyY] * h} r={court ? 4 : 3.5}
+        fill={a.result === (isKeeper ? "saved" : "goal") ? C.green : C.red}
+        stroke="#fff" strokeWidth="1.5" pointerEvents="none">
+        <title>{RESULT_LABEL[a.result]}</title>
+      </circle>)}
+      {selected && court && <circle cx={selected.x * w} cy={selected.y * h} r="48"
+        fill="none" stroke={C.ink} strokeWidth="2" strokeDasharray="6 5" pointerEvents="none" />}
+    </svg>
+  );
+}
+function SpatialThrowAnalysis({ shots, isKeeper }) {
+  const [metric, setMetric] = useState("density");
+  const [selected, setSelected] = useState(null);
+  const near = selected ? shots.filter((a) => Math.hypot((a.shotX - selected.x) * 400, (a.shotY - selected.y) * 292) <= 48) : shots;
+  const goalShots = near.filter(hasGoalPoint);
+  const blockedCount = near.filter((a) => a.result === "blocked").length;
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <strong style={{ fontFamily: SANS, fontSize: 14 }}>Punktanalyse · {shots.length} Würfe</strong>
+        <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+          {[["density", "Wurfdichte"], ["quote", isKeeper ? "Paradenquote" : "Torquote"]].map(([id, label]) => (
+            <button key={id} onClick={() => setMetric(id)} style={{ ...btnBase, padding: "8px 10px", fontSize: 13,
+              background: metric === id ? C.navy : "#fff", color: metric === id ? "#fff" : C.ink,
+              border: `2px solid ${metric === id ? C.navy : C.line}` }}>{label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: 13, color: C.sub }}>Feld antippen, um die Zielpunkte aus der Umgebung zu sehen. Bei „Torquote“ zeigt Rot eine niedrige, Grün eine hohe Quote; einzelne Punkte zeigen das Ergebnis.</div>
+      <PointHeatMap shots={shots} place="court" metric={metric} isKeeper={isKeeper} selected={selected}
+        onSelect={(p) => setSelected((cur) => cur && Math.hypot((cur.x - p.x) * 400, (cur.y - p.y) * 292) < 12 ? null : p)} />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: SANS, fontSize: 14, fontWeight: 700 }}>
+        <span>{selected ? `Zielpunkte · ${goalShots.length} Würfe aus der markierten Umgebung` : `Zielpunkte · ${goalShots.length} Würfe`}</span>
+        {selected && <Btn small kind="ghost" onClick={() => setSelected(null)}>Filter aufheben</Btn>}
+      </div>
+      {blockedCount > 0 && <div style={{ fontFamily: SANS, fontSize: 13, color: C.sub }}>
+        {blockedCount} {blockedCount === 1 ? "geblockter Wurf" : "geblockte Würfe"} ohne Zielpunkt im Tor
+      </div>}
+      {goalShots.length ? <PointHeatMap shots={goalShots} place="goal" metric={metric} isKeeper={isKeeper} />
+        : <Empty>Keine Würfe mit Zielpunkt im Tor in dieser Auswahl.</Empty>}
+    </div>
+  );
+}
+function ShotAnalysis({ games, selId, isKeeper, situationFilter, setSituationFilter }) {
+  const [localFilter, setLocalFilter] = useState("all");
+  const filter = situationFilter == null ? localFilter : situationFilter;
+  const setFilter = setSituationFilter || setLocalFilter;
+  const filteredGames = useMemo(() => filterThrowGames(games, filter), [games, filter]);
+  const shots = pointShots(filteredGames, selId, isKeeper);
+  const legacy = computeHeat(oldShotGames(filteredGames), selId, isKeeper);
+  return <div style={{ display: "grid", gap: 14 }}>
+    <ThrowSituationToggle value={filter} onChange={setFilter} />
+    {shots.length > 0 && <SpatialThrowAnalysis key={selId} shots={shots} isKeeper={isKeeper} />}
+    {legacy.total.n > 0 && <div style={shots.length > 0 ? { borderTop: `2px solid ${C.line}`, paddingTop: 14 } : {}}>
+      {shots.length > 0 && <div style={{ fontFamily: SANS, fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Ältere Würfe ohne genaue Position · {legacy.total.n}</div>}
+      <ThrowZoneDrilldown zones={legacy.zones} targets={legacy.targets} zoneTargets={legacy.zoneTargets} isKeeper={isKeeper} />
+    </div>}
+  </div>;
+}
+
 /* Abwurfzone→Zielzone-Drilldown: Klick auf eine Abwurfzone (Feldzonen und
    Standardsituationen) hebt sie hervor und filtert die Zielzonen-Heatmap auf
    die Würfe aus genau dieser Zone. Gemeinsam genutzt von HeatmapSection und
@@ -2514,21 +2744,26 @@ function PlayerThrowZoneCard({ games, player }) {
   return (
     <Card>
       <SectionH>Wurfanalyse – {isKeeper ? "Paradenquote" : "Torquote"}</SectionH>
-      <ThrowZoneDrilldown zones={zones} targets={targets} zoneTargets={zoneTargets} isKeeper={isKeeper} />
+      <ShotAnalysis games={games} selId={player.id} isKeeper={isKeeper} />
     </Card>
   );
 }
 
 function HeatmapSection({ team, games }) {
   const [selId, setSelId] = useState("team");
+  const [throwSituation, setThrowSituation] = useState("all");
   const player = team.players.find((p) => p.id === selId);
   const isKeeper = player?.pos === "TW";
   const keepers = team.players.filter((p) => p.pos === "TW");
   const field = team.players.filter((p) => p.pos === "F");
 
+  const situationGames = useMemo(
+    () => filterThrowGames(games, throwSituation),
+    [games, throwSituation]
+  );
   const { zones, targets, zoneTargets, total } = useMemo(
-    () => computeHeat(games, selId, isKeeper),
-    [team, games, selId, isKeeper]
+    () => computeHeat(situationGames, selId, isKeeper),
+    [situationGames, selId, isKeeper]
   );
 
   const metric = isKeeper ? "Paradenquote" : "Torquote";
@@ -2538,7 +2773,7 @@ function HeatmapSection({ team, games }) {
     <Card>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <SectionH>Heatmap – {metric}</SectionH>
+          <SectionH>Wurfanalyse</SectionH>
           <select style={inputStyle} value={selId} onChange={(e) => setSelId(e.target.value)}>
             <option value="team">Gesamtes Team (Würfe)</option>
             {field.length > 0 && (
@@ -2564,16 +2799,8 @@ function HeatmapSection({ team, games }) {
         <Empty>{isKeeper ? "Für diesen Torhüter sind noch keine gegnerischen Würfe erfasst." : "Noch keine Würfe im gewählten Zeitraum."}</Empty>
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          <ThrowZoneDrilldown zones={zones} targets={targets} zoneTargets={zoneTargets} isKeeper={isKeeper} />
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontFamily: SANS, fontSize: 12, color: C.sub, fontWeight: 700 }}>{metric} (Abwurfzone):</span>
-            {[0, 0.25, 0.5, 0.75, 1].map((q) => (
-              <span key={q} style={{
-                fontFamily: MONO, fontSize: 11, fontWeight: 700, color: heatText(q),
-                background: heatFill(q), borderRadius: 6, padding: "3px 8px",
-              }}>{Math.round(q * 100)}%</span>
-            ))}
-          </div>
+          <ShotAnalysis games={games} selId={selId} isKeeper={isKeeper}
+            situationFilter={throwSituation} setSituationFilter={setThrowSituation} />
         </div>
       )}
     </Card>
@@ -3150,6 +3377,22 @@ export function buildExportWorkbook({ team, games, sel, fromMin, toMin, rangeAct
     const heat = computeHeat(heatGames, player.id, player.pos === "TW");
     const ws = buildPlayerSheet({ player, agg, heat, heading, seasonScope });
     XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName(`#${player.number} ${player.name}`, used));
+  }
+  const pointRows = [["Spiel", "Datum", "Spielminute", "Seite", "Spieler", "Ergebnis", "Abwurf_X", "Abwurf_Y", "Ziel_X", "Ziel_Y"]];
+  for (const game of heatGames) for (const a of game.actions || []) {
+    if (!hasShotOrigin(a)) continue;
+    pointRows.push([
+      game.opponent, game.date, actMinute(a), a.side === "us" ? "Eigener Wurf" : "Gegner",
+      a.side === "us" ? playerName(team, a.playerId) : (playerName(team, a.keeperId) || ""),
+      RESULT_LABEL[a.result] || a.result,
+      a.shotX, a.shotY, hasGoalPoint(a) ? a.goalX : null, hasGoalPoint(a) ? a.goalY : null,
+    ]);
+  }
+  if (pointRows.length > 1) {
+    const ws = XLSX.utils.aoa_to_sheet(pointRows);
+    ws["!cols"] = [{ wch: 22 }, { wch: 14 }, { wch: 14 }, { wch: 18 }, { wch: 22 }, { wch: 14 },
+      { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName("Wurfpunkte", used));
   }
   return { wb, fileName: exportFileName(games, sel, situation) };
 }

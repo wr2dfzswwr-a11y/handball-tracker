@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "esbuild entry.jsx --bundle --minify --format=iife --outfile=app.js",
+    "test": "esbuild handball-tracker.jsx --bundle --platform=node --format=cjs --outfile=.shot-analysis-test.cjs && node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "xlsx-js-style": "1.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
