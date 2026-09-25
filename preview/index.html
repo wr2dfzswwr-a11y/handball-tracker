@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Handball-Tracker – Sync-Test</title>
+  <meta name="description" content="Separate Testversion für den sicheren Cloud-Start-Sync." />
+  <meta name="theme-color" content="#12233F" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #F1F4F8; }
+    body { padding-top: env(safe-area-inset-top); }
+    #preview-badge {
+      position: fixed;
+      top: calc(8px + env(safe-area-inset-top));
+      right: 8px;
+      z-index: 99999;
+      background: #E0A82E;
+      color: #16202E;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font: 800 11px/1 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      letter-spacing: .03em;
+      box-shadow: 0 2px 8px rgba(0,0,0,.15);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="preview-badge">SYNC-TESTVERSION</div>
+  <script src="./safe-sync-bootstrap.js?v=20260925"></script>
+  <script src="../app.js?v=20260925"></script>
+</body>
+</html>
