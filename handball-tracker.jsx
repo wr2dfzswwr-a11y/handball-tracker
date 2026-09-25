@@ -419,9 +419,9 @@ function HalfCourt({ svgRef, style, onPointerDown, children }) {
 
 /* Marker: state = "on" (Spieler), "free" (leerer Slot), "locked" (Strafzeit).
    Bei "locked" steht der Countdown in `name`, bei "on" die Trikotnummer in `number`. */
-function BoardMarker({ x, y, role, state, number, name, sub, isTW, highlight, dimmed, onClick, onPointerDown }) {
+function BoardMarker({ x, y, role, state, number, name, sub, isTW, highlight, dimmed, onClick, onPointerDown, dataPos }) {
   return (
-    <g onClick={onClick} onPointerDown={onPointerDown}
+    <g data-lineup-pos={dataPos} onClick={onClick} onPointerDown={onPointerDown}
       style={{
         cursor: onPointerDown ? "grab" : onClick ? "pointer" : "default",
         touchAction: "none", opacity: dimmed ? 0.25 : 1,
@@ -456,7 +456,7 @@ function BoardMarker({ x, y, role, state, number, name, sub, isTW, highlight, di
       {sub && (
         <text x={x < 60 ? x - 24 : x > 340 ? x + 24 : x} y={y + 34}
           textAnchor={x < 60 ? "start" : x > 340 ? "end" : "middle"} pointerEvents="none"
-          style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, fill: state === "locked" ? C.red : C.ink }}>{sub}</text>
+          style={{ fontFamily: SANS, fontSize: 11, fontWeight: 700, fill: state === "locked" ? C.red : "#000" }}>{sub}</text>
       )}
     </g>
   );
@@ -465,7 +465,7 @@ const firstName = (n) => (n || "").split(" ")[0].slice(0, 10);
 
 /* Angriffs-Halbfeld: automatisches Mapping der Lineup-Slots auf die Formation.
    Tap auf Spieler = Aktions-Flow, Tap auf freien/gesperrten Slot = Wechsel-Modal. */
-export function AttackBoard({ team, lineup, formation, penByPos, sec, onPlayer, onSlot }) {
+export function AttackBoard({ team, lineup, formation, penByPos, sec, onPlayer, onSlot, onDragStart, dragOverPos }) {
   const layout = ATTACK_LAYOUT[formation] || ATTACK_LAYOUT["5:1"];
   const twPen = penByPos.TW || null;
   const keeper = lineup && lineup.TW ? team.players.find((x) => x.id === lineup.TW) : null;
@@ -473,14 +473,15 @@ export function AttackBoard({ team, lineup, formation, penByPos, sec, onPlayer, 
     <HalfCourt style={{ touchAction: "manipulation" }}>
       {/* Torhüter im Tor (nur Anzeige; Aktions-Tap wie bei Feldspielern) */}
       {twPen ? (
-        <BoardMarker x={200} y={20} state="locked"
+        <BoardMarker x={200} y={20} state="locked" dataPos="TW"
           name={fmtClock(Math.max(0, twPen.startSec + P2_SECONDS - sec))}
           sub="TW gesperrt" onClick={() => onSlot("TW")} />
       ) : keeper ? (
-        <BoardMarker x={200} y={20} state="on" isTW number={keeper.number}
-          sub={firstName(keeper.name)} onClick={() => onPlayer(keeper.id)} />
+        <BoardMarker x={200} y={20} state="on" isTW number={keeper.number} dataPos="TW"
+          highlight={dragOverPos === "TW"} sub={firstName(keeper.name)} onClick={() => onPlayer(keeper.id)}
+          onPointerDown={(e) => onDragStart?.(e, keeper.id, "TW")} />
       ) : (
-        <BoardMarker x={200} y={20} state="free" onClick={() => onSlot("TW")} />
+        <BoardMarker x={200} y={20} state="free" dataPos="TW" highlight={dragOverPos === "TW"} onClick={() => onSlot("TW")} />
       )}
       {POSITIONS.filter((pos) => layout[pos]).map((pos) => {
         const c = layout[pos];
@@ -489,14 +490,17 @@ export function AttackBoard({ team, lineup, formation, penByPos, sec, onPlayer, 
         const pl = pid ? team.players.find((x) => x.id === pid) : null;
         if (pen) {
           const planned = pen.plannedInId ? team.players.find((x) => x.id === pen.plannedInId) : null;
-          return <BoardMarker key={pos} x={c.x} y={c.y} role={c.label} state="locked"
+          return <BoardMarker key={pos} x={c.x} y={c.y} role={c.label} state="locked" dataPos={pos}
             name={fmtClock(Math.max(0, pen.startSec + P2_SECONDS - sec))}
             sub={planned ? `→ ${firstName(planned.name)}` : "gesperrt"}
             onClick={() => onSlot(pos)} />;
         }
-        if (!pl) return <BoardMarker key={pos} x={c.x} y={c.y} role={c.label} state="free" onClick={() => onSlot(pos)} />;
+        if (!pl) return <BoardMarker key={pos} x={c.x} y={c.y} role={c.label} state="free"
+          dataPos={pos} highlight={dragOverPos === pos} onClick={() => onSlot(pos)} />;
         return <BoardMarker key={pos} x={c.x} y={c.y} role={c.label} state="on" isTW={pl.pos === "TW"}
-          number={pl.number} sub={firstName(pl.name)} onClick={() => onPlayer(pid)} />;
+          dataPos={pos} highlight={dragOverPos === pos}
+          number={pl.number} sub={firstName(pl.name)} onClick={() => onPlayer(pid)}
+          onPointerDown={(e) => onDragStart?.(e, pid, pos)} />;
       })}
     </HalfCourt>
   );
@@ -1298,32 +1302,7 @@ function NewGameScreen({ data, update, go, teamId }) {
   const [lineup, setLineup] = useState({});   // pos -> playerId
   const [pickPos, setPickPos] = useState(null);
   const [err, setErr] = useState("");
-  /* Taktiktafel: Formationen + Abwehr-Vorbelegung. defSlots === null bedeutet
-     „automatisch aus der Aufstellung" (LA, RL, RM, RR, RA, KL) – erst nach
-     manueller Änderung wird die Zuordnung fest gespeichert. */
   const [attackF, setAttackF] = useState("5:1");
-  const [defF, setDefF] = useState("6:0");
-  const [defSlots, setDefSlots] = useState(null);
-  const effDefSlots = defSlots || defaultDefenseSlots(lineup, defF);
-  const changeDefFormation = (v) => {
-    setDefSlots((s) => (s ? remapDefenseSlots(s, defF, v) : s));
-    setDefF(v);
-  };
-  const ngDrop = (pid, fromKey, toKey) => {
-    setDefSlots((s0) => {
-      const s = { ...(s0 || defaultDefenseSlots(lineup, defF)) };
-      if (!toKey) { if (fromKey) delete s[fromKey]; return s; }
-      const prev = s[toKey] || null;
-      for (const k of Object.keys(s)) if (s[k] === pid) delete s[k];
-      if (prev && fromKey && prev !== pid) s[fromKey] = prev;
-      s[toKey] = pid;
-      return s;
-    });
-  };
-  const ngOnField = new Set(Object.values(lineup));
-  const ngUnassigned = DEF_PREFILL_ORDER.map((ps) => lineup[ps]).filter(Boolean)
-    .filter((pid) => !Object.values(effDefSlots).includes(pid))
-    .map((pid) => team.players.find((x) => x.id === pid)).filter(Boolean);
   const toggle = (id) => setSel((s) => {
     const n = new Set(s);
     if (n.has(id)) {
@@ -1342,11 +1321,6 @@ function NewGameScreen({ data, update, go, teamId }) {
     if (sel.size === 0) { setErr("Bitte den Spieltagskader auswählen."); return; }
     if (!lineupComplete) { setErr("Bitte alle 7 Positionen der Startaufstellung besetzen."); return; }
     const id = uid();
-    // Abwehr-Zuordnung: auf aufgestellte Spieler beschränken und fest speichern.
-    const srcSlots = defSlots || defaultDefenseSlots(lineup, defF);
-    const lineupIds = new Set(Object.values(lineup));
-    const cleanSlots = {};
-    for (const [k, v] of Object.entries(srcSlots)) if (lineupIds.has(v)) cleanSlots[k] = v;
     update((d) => {
       d.games.push({
         id, teamId, opponent: opp.trim(), date, home, test,
@@ -1354,7 +1328,7 @@ function NewGameScreen({ data, update, go, teamId }) {
         timerSec: 0, half: 1,
         startLineup: { ...lineup }, subs: [], penalties: [],
         activeKeeperId: lineup.TW || null,
-        attackFormation: attackF, defenseFormation: defF, defenseSlots: cleanSlots,
+        attackFormation: attackF, defenseFormation: "6:0", defenseSlots: defaultDefenseSlots(lineup, "6:0"),
       });
     });
     go(start ? { name: "live", teamId, gameId: id } : { name: "team", teamId, tab: "spiele" });
@@ -1465,23 +1439,7 @@ function NewGameScreen({ data, update, go, teamId }) {
             <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 800, color: C.sub }}>Angriffsformation</span>
             <FormationSelect value={attackF} options={ATTACK_FORMATIONS} onChange={setAttackF} />
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 800, color: C.sub }}>Abwehrformation</span>
-            <FormationSelect value={defF} options={DEFENSE_FORMATIONS} onChange={changeDefFormation} />
-          </div>
         </div>
-        {ngOnField.size > 1 && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontFamily: SANS, fontSize: 12, color: C.sub, marginBottom: 6 }}>
-              Abwehr-Vorbelegung (automatisch in der Reihenfolge LA, RL, RM, RR, RA, KL) – per Ziehen anpassbar:
-            </div>
-            <DefenseBoard team={team} formation={defF} slots={effDefSlots}
-              onFieldIds={ngOnField} penByPid={{}} sec={0}
-              unassigned={ngUnassigned} onDrop={ngDrop}
-              keeper={lineup.TW ? team.players.find((x) => x.id === lineup.TW) : null}
-              keeperPen={null} onKeeperSlot={() => setPickPos("TW")} />
-          </div>
-        )}
       </Card>
       {err && <div style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.red, marginBottom: 10 }}>{err}</div>}
       <div style={{ display: "flex", gap: 8 }}>
@@ -1525,7 +1483,9 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
   const [pending, setPending] = useState(null); // {side, playerId?, assistId?, pickShooter?, zone?, target?}
   const [subModal, setSubModal] = useState(null); // {selPos?}
   const [showStats, setShowStats] = useState(false); // Live-Statistik-Overlay
-  const [defOpen, setDefOpen] = useState(true); // Abwehrtafel ein-/ausklappen (reiner UI-Zustand)
+  const [showTimeControls, setShowTimeControls] = useState(false);
+  const [drag, setDrag] = useState(null);
+  const suppressPlayerClick = useRef(0);
   const secRef = useRef(sec);
   secRef.current = sec;
 
@@ -1583,19 +1543,7 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
   const keeperNow = lineup ? lineup.TW : game.activeKeeperId;
   const activeKeeper = team.players.find((p) => p.id === keeperNow);
 
-  /* Taktiktafel: Formationen + Abwehr-Slots (Legacy-Spiele ohne gespeicherte
-     Slots folgen bis zur ersten manuellen Änderung der Angriffsaufstellung). */
   const attackFormation = game.attackFormation || "5:1";
-  const defenseFormation = game.defenseFormation || "6:0";
-  const defSlots = game.defenseSlots || defaultDefenseSlots(lineup, defenseFormation);
-  const penByPid = {};
-  for (const p of game.penalties || []) penByPid[p.playerId] = p;
-  const defAssigned = new Set(Object.values(defSlots));
-  const defUnassigned = hasLineup
-    ? POSITIONS.filter((ps) => ps !== "TW").map((ps) => lineup[ps]).filter(Boolean)
-        .filter((pid) => !defAssigned.has(pid))
-        .map((pid) => team.players.find((x) => x.id === pid)).filter(Boolean)
-    : [];
 
   const persist = (fn) => update((d) => {
     const g = d.games.find((x) => x.id === gameId);
@@ -1629,23 +1577,6 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
     }
   };
   const setAttackFormation = (v) => persist((g) => { g.attackFormation = v; });
-  const setDefenseFormation = (v) => persist((g) => {
-    ensureDefense(g);
-    g.defenseSlots = remapDefenseSlots(g.defenseSlots, g.defenseFormation, v);
-    g.defenseFormation = v;
-  });
-  /* Drag & Drop in der Abwehr: Slot↔Slot tauscht, Chip→Slot belegt (verdrängt
-     ggf. in „nicht zugeordnet"), Ablegen außerhalb entfernt die Zuordnung.
-     Auch Spieler mit Strafzeit sind verschiebbar (Restabwehr anpassen). */
-  const dropDefense = (pid, fromKey, toKey) => persist((g) => {
-    ensureDefense(g);
-    const s = g.defenseSlots;
-    if (!toKey) { if (fromKey) delete s[fromKey]; return; }
-    const prev = s[toKey] || null;
-    for (const k of Object.keys(s)) if (s[k] === pid) delete s[k];
-    if (prev && fromKey && prev !== pid) s[fromKey] = prev;
-    s[toKey] = pid;
-  });
 
   /* Strafe erfassen – bei 2min/Rot/Blau geht der Spieler automatisch runter */
   const addPenalty = (kind, playerId) => {
@@ -1707,9 +1638,9 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
       setSubModal({ selPos: pos });
     }
   };
-  const clickBench = (pid) => {
-    if (!subModal || !subModal.selPos) return;
-    const selPos = subModal.selPos;
+  const clickBench = (pid, targetPos = subModal?.selPos) => {
+    if (!targetPos) return;
+    const selPos = targetPos;
     const pen = penByPos[selPos];
     if (pen) {
       // Slot gesperrt: Spieler kommt erst nach Ablauf der Strafe
@@ -1732,7 +1663,7 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
     });
     setSubModal(null);
   };
-  /* Torhüterwechsel über die "Im Tor"-Chips (erzeugt TW-Wechselereignis) */
+  /* Auswahl des aktiven Torhüters bei älteren Spielen ohne Aufstellung. */
   const setKeeper = (pid) => {
     if (!hasLineup) { persist((g) => { g.activeKeeperId = pid; }); return; }
     if (penByPos.TW || lineup.TW === pid) return;
@@ -1743,6 +1674,74 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
       });
       g.activeKeeperId = pid;
     });
+  };
+
+  /* Wechsel direkt auf der Angriffstafel: Bank → Position, Position → Bank
+     und Feldposition → Feldposition. Pointer-Events funktionieren auch per Touch. */
+  const dropFieldPosition = (fromPos, toPos) => {
+    if (fromPos === toPos || penByPos[fromPos] || penByPos[toPos]) return;
+    if (fromPos === "TW" || toPos === "TW") return;
+    const aId = lineup[fromPos], bId = lineup[toPos];
+    if (!aId) return;
+    persist((g) => {
+      if (bId) {
+        g.subs.push({ id: uid(), sec: secRef.current, half: g.half || 1,
+          kind: "swap", posA: fromPos, posB: toPos, aId, bId });
+      } else {
+        g.subs.push({ id: uid(), sec: secRef.current, half: g.half || 1,
+          pos: fromPos, outId: aId, inId: null, reason: "sub" });
+        g.subs.push({ id: uid(), sec: secRef.current, half: g.half || 1,
+          pos: toPos, outId: null, inId: aId, reason: "sub" });
+      }
+    });
+  };
+  const beginLineupDrag = (event, pid, fromPos = null) => {
+    if (!hasLineup || event.button !== 0) return;
+    const pointerId = event.pointerId;
+    const startX = event.clientX, startY = event.clientY;
+    let moved = false;
+    const hitAt = (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      return { pos: el?.closest?.("[data-lineup-pos]")?.getAttribute("data-lineup-pos") || null,
+        bench: !!el?.closest?.("[data-bench-drop]") };
+    };
+    const move = (e) => {
+      if (e.pointerId !== pointerId) return;
+      if (!moved && Math.hypot(e.clientX - startX, e.clientY - startY) < 8) return;
+      moved = true;
+      e.preventDefault();
+      const hit = hitAt(e.clientX, e.clientY);
+      setDrag({ pid, fromPos, x: e.clientX, y: e.clientY,
+        targetPos: hit.pos, overBench: hit.bench });
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      setDrag(null);
+    };
+    const cancel = (e) => { if (e.pointerId === pointerId) cleanup(); };
+    const finish = (e) => {
+      if (e.pointerId !== pointerId) return;
+      const hit = hitAt(e.clientX, e.clientY);
+      cleanup();
+      if (!moved) return;
+      suppressPlayerClick.current = Date.now() + 350;
+      if (fromPos && hit.bench && !penByPos[fromPos]) {
+        persist((g) => {
+          g.subs.push({ id: uid(), sec: secRef.current, half: g.half || 1,
+            pos: fromPos, outId: pid, inId: null, reason: "sub" });
+          if (g.defenseSlots) subDefenseSlots(g.defenseSlots, pid, null);
+          if (fromPos === "TW") g.activeKeeperId = null;
+        });
+      } else if (hit.pos && !fromPos) {
+        const player = team.players.find((p) => p.id === pid);
+        if (!!player && (player.pos === "TW") === (hit.pos === "TW")) clickBench(pid, hit.pos);
+      } else if (hit.pos && fromPos) dropFieldPosition(fromPos, hit.pos);
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
   };
 
   /* Aktionen + Wechsel als gemeinsamer Verlauf */
@@ -1761,67 +1760,62 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
 
   return (
     <div>
-      {/* Scoreboard */}
-      <div style={{
-        background: C.navy, borderRadius: 18, padding: "14px 16px", marginBottom: 14,
-        display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
-      }}>
-        <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: "#9FB4D6", letterSpacing: "0.05em" }}>
-            {team.name} vs. {game.opponent}
-          </div>
-          <div style={{ fontFamily: MONO, fontWeight: 800, fontSize: 40, color: "#fff", lineHeight: 1.1 }}>
-            {sc.us}<span style={{ color: "#5E76A0" }}>:</span>{sc.them}
-          </div>
+      {/* Spielsteuerung: drei gleich breite Tasten, darunter Spielstand. */}
+      <div style={{ background: C.navy, borderRadius: 18, padding: "14px 16px", marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+          <button onClick={() => setShowTimeControls((v) => !v)} aria-expanded={showTimeControls}
+            style={{ ...btnBase, minWidth: 0, minHeight: 52, padding: "8px 4px", background: C.blueSoft,
+              color: C.blueDark, fontFamily: MONO, fontSize: 16, fontWeight: 800 }}>
+            {fmtClock(sec)}<span style={{ display: "block", fontFamily: SANS, fontSize: 11 }}>HZ {half}</span>
+          </button>
+          <button onClick={() => setShowStats(true)} style={{ ...btnBase, minWidth: 0, minHeight: 52,
+            padding: "8px 4px", background: C.blueSoft, color: C.blueDark, fontSize: 14 }}>📊 Statistik</button>
+          <button onClick={() => { setRunning(!running); persist(() => {}); }} style={{
+            ...btnBase, minWidth: 0, minHeight: 52, padding: "8px 4px", fontSize: 14,
+            background: running ? C.orangeSoft : C.greenSoft, color: running ? C.orange : C.green,
+          }}>{running ? "⏸ Pause" : "▶ Start"}</button>
         </div>
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontFamily: MONO, fontWeight: 800, fontSize: 28, color: C.yellow }}>{fmtClock(sec)}</div>
-          <div style={{ display: "flex", gap: 4, marginTop: 4, justifyContent: "center" }}>
-            {[1, 2].map((h) => (
-              <button key={h} onClick={() => setHalf(h)} style={{
-                ...btnBase, padding: "4px 10px", fontSize: 12, borderRadius: 8,
-                background: half === h ? C.yellow : "rgba(255,255,255,0.12)",
-                color: half === h ? C.navy : "#B9C7DF",
-              }}>HZ{h}</button>
-            ))}
+        {showTimeControls && (
+          <div style={{ display: "flex", gap: 6, marginTop: 8, justifyContent: "center" }}>
+            {[1, 2].map((h) => <button key={h} onClick={() => setHalf(h)} style={{
+              ...btnBase, padding: "7px 14px", background: half === h ? C.yellow : "rgba(255,255,255,0.12)",
+              color: half === h ? C.navy : "#fff", fontSize: 13,
+            }}>HZ {h}</button>)}
           </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-around", gap: 8,
+          color: "#fff", marginTop: 12, textAlign: "center" }}>
+          <span style={{ flex: 1, minWidth: 0, fontFamily: SANS, fontSize: 15, overflowWrap: "anywhere" }}>{team.name}</span>
+          <span style={{ fontFamily: MONO, fontWeight: 800, fontSize: 34, whiteSpace: "nowrap" }}>
+            {sc.us}<span style={{ color: "#9FB4D6" }}> : </span>{sc.them}
+          </span>
+          <span style={{ flex: 1, minWidth: 0, fontFamily: SANS, fontSize: 15, overflowWrap: "anywhere" }}>{game.opponent}</span>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <Btn small kind={running ? "danger" : "green"} onClick={() => {
-            setRunning(!running);
-            persist(() => {});
-          }} style={{ minWidth: 92 }}>{running ? "⏸ Pause" : "▶ Start"}</Btn>
-          <Btn small kind="soft" onClick={undo} style={{ background: "rgba(255,255,255,0.12)", color: "#fff" }}
-            disabled={game.actions.length === 0}>↩ Rückgängig</Btn>
-          <Btn small kind="soft" onClick={() => setShowStats(true)}
-            style={{ background: "rgba(255,255,255,0.12)", color: "#fff" }}>📊 Statistik</Btn>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 10, flexWrap: "wrap" }}>
+          <Btn small kind="soft" onClick={undo} disabled={game.actions.length === 0}
+            style={{ background: "rgba(255,255,255,0.12)", color: "#fff" }}>↩ Rückgängig</Btn>
           <ConfirmBtn label="Spiel beenden" confirmLabel="Wirklich beenden?" onConfirm={endGame} />
         </div>
       </div>
 
-      {/* Torhüter aktiv */}
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 800, color: C.sub }}>Im Tor:</span>
-        {keepers.length === 0 && <span style={{ fontFamily: SANS, fontSize: 13, color: C.sub }}>kein Torhüter im Kader-Auszug</span>}
-        {keepers.map((k) => (
-          <button key={k.id} onClick={() => setKeeper(k.id)} style={{
-            ...btnBase, padding: "8px 12px", fontSize: 13,
-            background: keeperNow === k.id ? C.orange : "#fff",
-            color: keeperNow === k.id ? "#fff" : C.sub,
-            border: `2px solid ${keeperNow === k.id ? "transparent" : C.line}`,
-            opacity: hasLineup && penByPos.TW ? 0.5 : 1,
-          }}>#{k.number} {k.name}</button>
-        ))}
-        {hasLineup && penByPos.TW && (
-          <span style={{ fontFamily: SANS, fontSize: 12, color: C.red }}>TW-Slot gesperrt (Strafzeit)</span>
-        )}
+      {/* Häufigste Gegneraktion zuerst. */}
+      <SectionH>Gegner</SectionH>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 14 }}>
+        <Btn kind="accent" style={{ padding: "16px", fontSize: 16 }}
+          onClick={() => setPending({ side: "them", step: "zone" })}>
+          🥅 Wurf des Gegners {activeKeeper ? `(im Tor: ${activeKeeper.name})` : ""}
+        </Btn>
+        <Btn style={{ padding: "16px", fontSize: 15, background: C.redSoft, color: C.red, border: `2px solid ${C.red}` }}
+          onClick={() => addAction({ type: "oppPenalty", kind: "p2" })}>
+          ⏱ 2 min Gegner
+        </Btn>
       </div>
 
       {/* Spieler-Grid */}
       {hasLineup ? (
         <>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-            <SectionH>Auf dem Feld – Spieler antippen</SectionH>
+            <SectionH>Auf dem Feld · Angriff</SectionH>
             <Btn small kind="soft" onClick={() => setSubModal({})}>⇄ Wechsel</Btn>
           </div>
           <Card style={{ marginBottom: 10, padding: 10 }}>
@@ -1831,37 +1825,25 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
             </div>
             <AttackBoard team={team} lineup={lineup} formation={attackFormation}
               penByPos={penByPos} sec={sec}
-              onPlayer={(pid) => setPending({ side: "us", playerId: pid })}
-              onSlot={(pos) => setSubModal({ selPos: pos })} />
+              onPlayer={(pid) => { if (Date.now() > suppressPlayerClick.current) setPending({ side: "us", playerId: pid }); }}
+              onSlot={(pos) => { if (Date.now() > suppressPlayerClick.current) setSubModal({ selPos: pos }); }}
+              onDragStart={beginLineupDrag} dragOverPos={drag?.targetPos} />
           </Card>
-          <Card style={{ marginBottom: 14, padding: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
-              <button onClick={() => setDefOpen((o) => !o)} style={{
-                ...btnBase, padding: "4px 8px", background: "transparent", color: C.sub,
-                display: "flex", alignItems: "center", gap: 6, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.06em",
-              }}>
-                <span style={{ fontSize: 12 }}>{defOpen ? "▾" : "▸"}</span> Abwehr
-              </button>
-              <FormationSelect value={defenseFormation} options={DEFENSE_FORMATIONS} onChange={setDefenseFormation} />
-            </div>
-            {defOpen && (
-              <DefenseBoard team={team} formation={defenseFormation} slots={defSlots}
-                onFieldIds={onFieldIds} penByPid={penByPid} sec={sec}
-                unassigned={defUnassigned} onDrop={dropDefense}
-                onPlayer={(pid) => setPending({ side: "us", playerId: pid })}
-                keeper={lineup.TW ? team.players.find((x) => x.id === lineup.TW) : null}
-                keeperPen={penByPos.TW || null}
-                onKeeperSlot={() => setSubModal({ selPos: "TW" })} />
-            )}
-          </Card>
-          {bench.length > 0 && (
-            <>
-              <SectionH>Bank</SectionH>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8, marginBottom: 14 }}>
+          <>
+              <SectionH>Bank · Spielerwechsel</SectionH>
+              <div style={{ fontFamily: SANS, fontSize: 13, color: C.sub, marginBottom: 6 }}>
+                Spieler auf eine Feldposition ziehen. Für Wechsel per Antippen oben „Wechsel“ öffnen.
+              </div>
+              <div data-bench-drop="true" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+                gap: 8, marginBottom: 14, padding: 6, borderRadius: 10, minHeight: 54,
+                background: drag?.fromPos && drag.overBench ? C.blueSoft : "transparent" }}>
+                {bench.length === 0 && <span style={{ fontFamily: SANS, fontSize: 13, color: C.sub }}>Bank leer</span>}
                 {bench.map((p) => (
-                  <button key={p.id} onClick={() => setPending({ side: "us", playerId: p.id })} style={{
+                  <button key={p.id} onPointerDown={(e) => beginLineupDrag(e, p.id)}
+                    onClick={() => { if (Date.now() > suppressPlayerClick.current) setPending({ side: "us", playerId: p.id }); }} style={{
                     ...btnBase, padding: "12px 10px", textAlign: "left", background: "#fff",
-                    border: `2px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10, color: C.ink, opacity: 0.85,
+                    border: `2px solid ${C.line}`, display: "flex", alignItems: "center", gap: 10,
+                    color: C.ink, opacity: 0.85, touchAction: "none",
                   }}>
                     <span style={{
                       fontFamily: MONO, fontWeight: 800, fontSize: 15, color: "#fff",
@@ -1871,11 +1853,20 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
                   </button>
                 ))}
               </div>
-            </>
-          )}
+          </>
         </>
       ) : (
         <>
+          {keepers.length > 0 && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.sub }}>Aktiver Torhüter:</span>
+              {keepers.map((k) => <button key={k.id} onClick={() => setKeeper(k.id)} style={{
+                ...btnBase, padding: "8px 12px", fontSize: 13,
+                background: keeperNow === k.id ? C.orange : "#fff",
+                color: keeperNow === k.id ? "#fff" : C.sub,
+              }}>#{k.number} {k.name}</button>)}
+            </div>
+          )}
           <SectionH>Eigene Aktion – Spieler antippen</SectionH>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8, marginBottom: 14 }}>
             {roster.map((p) => (
@@ -1894,18 +1885,15 @@ function LiveScreen({ data, update, go, teamId, gameId }) {
         </>
       )}
 
-      {/* Gegner */}
-      <SectionH>Gegner</SectionH>
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8, marginBottom: 14 }}>
-        <Btn kind="accent" style={{ padding: "16px", fontSize: 16 }}
-          onClick={() => setPending({ side: "them", step: "zone" })}>
-          🥅 Wurf des Gegners {activeKeeper ? `(im Tor: ${activeKeeper.name})` : ""}
-        </Btn>
-        <Btn style={{ padding: "16px", fontSize: 15, background: C.redSoft, color: C.red, border: `2px solid ${C.red}` }}
-          onClick={() => addAction({ type: "oppPenalty", kind: "p2" })}>
-          ⏱ 2 min Gegner
-        </Btn>
-      </div>
+      {drag && (() => {
+        const player = team.players.find((p) => p.id === drag.pid);
+        return <div aria-hidden="true" style={{ position: "fixed", left: drag.x + 14, top: drag.y + 14,
+          zIndex: 100, pointerEvents: "none", padding: "8px 12px", borderRadius: 9,
+          background: C.navy, color: "#fff", fontFamily: SANS, fontWeight: 700,
+          boxShadow: "0 6px 18px rgba(0,0,0,0.25)" }}>
+          #{player?.number} {player?.name}
+        </div>;
+      })()}
 
       {/* Letzte Aktionen */}
       <Card>
