@@ -1,5 +1,14 @@
-const CACHE = "handball-tracker-v23";
+const CACHE = "handball-tracker-v24-guide";
 const ASSETS = [
+  "./guide.html",
+  "./guide-dialog.css",
+  "./assets/guide/startseite.png",
+  "./assets/guide/cloud.png",
+  "./assets/guide/kader.png",
+  "./assets/guide/spielvorbereitung.png",
+  "./assets/guide/live-bank.png",
+  "./assets/guide/abwurfpunkt.png",
+  "./assets/guide/zielpunkt.png",
   "./",
   "./index.html",
   "./storage-bootstrap.js",
