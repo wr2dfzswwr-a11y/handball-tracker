@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import * as XLSX from "xlsx-js-style";
+import GuideDialog from "./guide-dialog.jsx";
 
 /* ============================================================
    Handball-Tracker
@@ -4005,6 +4006,7 @@ function CloudScreen({ data, setData, cloud, setCloud, go }) {
 }
 
 export default function App() {
+  const [showGuide, setShowGuide] = useState(false);
   const [data, setData] = useState(null);
   const [cloud, setCloudState] = useState(null);
   const [boot, setBoot] = useState("Lade Daten …");
@@ -4087,15 +4089,19 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
       <div style={{
-        background: C.navy, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10,
+        background: C.navy, padding: "10px 16px", display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10,
         position: "sticky", top: 0, zIndex: 40,
       }}>
         <span onClick={() => go({ name: "teams" })} style={{ cursor: "pointer", fontFamily: SANS, fontWeight: 900, fontSize: 16, color: "#fff", letterSpacing: "-0.01em" }}>
           🤾 Handball-Tracker
         </span>
-        <span style={{ flex: 1, fontFamily: SANS, fontSize: 12, color: readOnly ? C.yellow : "#7E93B8" }}>
+        <span className="app-tagline" style={{ flex: 1, fontFamily: SANS, fontSize: 12, color: readOnly ? C.yellow : "#7E93B8" }}>
           {readOnly ? "Nur-Lese-Zugang" : "Saison-Statistik live vom Spielfeldrand"}
         </span>
+        <button onClick={() => setShowGuide(true)} title="Anleitung öffnen" aria-haspopup="dialog"
+          style={{ ...btnBase, padding: "6px 10px", fontSize: 12, background: "rgba(255,255,255,0.12)", color: "#fff" }}>
+          Anleitung
+        </button>
         <button onClick={() => go({ name: "cloud" })} title="Cloud-Sync"
           style={{ ...btnBase, padding: "6px 10px", fontSize: 12, background: "rgba(255,255,255,0.12)", color: "#fff" }}>
           ☁ Cloud
@@ -4129,6 +4135,7 @@ export default function App() {
         {route.name === "player" && <PlayerScreen data={data} go={go} teamId={route.teamId} playerId={route.playerId} init={route.init} back={route.back} />}
         {route.name === "cloud" && <CloudScreen data={data} setData={setData} cloud={cloud} setCloud={setCloud} go={go} />}
       </div>
+      {showGuide && <GuideDialog onClose={() => setShowGuide(false)} />}
       {toast && (
         <div style={{
           position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 20, zIndex: 60,

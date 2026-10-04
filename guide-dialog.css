@@ -1,0 +1,8 @@
+.guide-dialog{box-sizing:border-box;width:min(1160px,calc(100vw - 24px));height:calc(100dvh - 24px);max-width:none;max-height:none;margin:auto;padding:0;border:0;border-radius:16px;background:#f1f4f8;color:#12233f;box-shadow:0 18px 70px #0005;overflow:hidden}
+.guide-dialog::backdrop{background:#12233fb8}
+.guide-dialog[open]{display:flex;flex-direction:column}
+.guide-dialog-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;background:#12233f;color:#fff;font:16px system-ui}
+.guide-dialog-bar button{border:1px solid #91a1b8;border-radius:8px;background:transparent;color:#fff;padding:10px 14px;font:600 14px system-ui;cursor:pointer;min-height:44px}
+.guide-dialog iframe{width:100%;flex:1;min-height:0;border:0;background:#f1f4f8}
+.app-toolbar{flex-wrap:wrap}
+@media(max-width:600px){.app-toolbar .app-tagline{display:none}.guide-dialog{width:100vw;height:100dvh;border-radius:0}}
